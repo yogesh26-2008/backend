@@ -12,7 +12,7 @@ from app.utils.password import hash_password, verify_password
 from app.services.notification_service import send_welcome_notification
 
 
-def _build_auth_response(user_doc: dict, message: str) -> dict:
+def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
     uid = str(user_doc["_id"])
     token = create_access_token(uid, user_doc["email"])
     user = UserResponse(
@@ -27,7 +27,18 @@ def _build_auth_response(user_doc: dict, message: str) -> dict:
     return AuthResponse(access_token=token, user=user, message=message)
 
 
+def _require_db(db: AsyncIOMotorDatabase):
+    """Raise a clear 503 if MongoDB is not connected."""
+    if db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not available. Please try again in a moment.",
+        )
+
+
 async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthResponse:
+    _require_db(db)
+
     if await db.users.find_one({"email": data.email}):
         raise HTTPException(status_code=400, detail="Email is already registered")
     if await db.users.find_one({"username": data.username}):
@@ -54,6 +65,8 @@ async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthR
 
 
 async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthResponse:
+    _require_db(db)
+
     user = await db.users.find_one({"email": data.email})
     if not user or not user.get("password_hash"):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -74,9 +87,16 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
 async def auth_with_google_userinfo(
     userinfo: dict, fcm_token: str | None, db: AsyncIOMotorDatabase
 ) -> AuthResponse:
-    email = userinfo["email"]
-    google_id = userinfo["sub"]
-    name = userinfo.get("name", email.split("@")[0])
+    _require_db(db)
+
+    email = userinfo.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account has no email")
+
+    # FIX: Google's /userinfo/v2 returns "id", OpenID token returns "sub"
+    # Handle both so it never KeyErrors
+    google_id = userinfo.get("sub") or userinfo.get("id") or ""
+    name = userinfo.get("name") or email.split("@")[0]
     picture = userinfo.get("picture")
 
     existing = await db.users.find_one({"email": email})
@@ -97,6 +117,7 @@ async def auth_with_google_userinfo(
         await send_welcome_notification(fcm_token, existing["name"], is_signup=False)
         return _build_auth_response(existing, "Welcome back to Trandia!")
 
+    # Generate unique username from email
     base_username = email.split("@")[0].lower().replace(".", "")
     username = base_username
     counter = 1
@@ -127,6 +148,8 @@ async def auth_with_google_userinfo(
 async def auth_with_google_id_token(
     token_str: str, fcm_token: str | None, db: AsyncIOMotorDatabase
 ) -> AuthResponse:
+    _require_db(db)
+
     idinfo = None
     for audience in [settings.google_android_client_id, settings.google_client_id]:
         try:
