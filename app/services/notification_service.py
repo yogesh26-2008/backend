@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -57,26 +58,23 @@ async def send_welcome_notification(fcm_token: str, name: str, is_signup: bool):
             f"Hey {first_name}, your account is live. "
             "Start exploring conversations, connect with people, and make your voice heard."
         )
-        image = None
     else:
         title = f"Welcome back, {first_name}! 👋"
         body = (
             "Great to see you again. "
             "Your conversations are waiting — jump right back in."
         )
-        image = None
 
     try:
         msg = messaging.Message(
             notification=messaging.Notification(
                 title=title,
                 body=body,
-                image=image,
             ),
             token=fcm_token,
             android=messaging.AndroidConfig(
                 priority="high",
-                ttl=3600,               # notification expires in 1 hour
+                ttl=3600,
                 notification=messaging.AndroidNotification(
                     channel_id="trandia_auth",
                     color="#00C853",
@@ -100,7 +98,13 @@ async def send_welcome_notification(fcm_token: str, name: str, is_signup: bool):
                 "click_action": "FLUTTER_NOTIFICATION_CLICK",
             },
         )
-        response = messaging.send(msg)
+        # BUG FIX: messaging.send() is a SYNCHRONOUS call from the Firebase
+        # Admin SDK. Calling it directly inside an async FastAPI route blocks
+        # the entire uvicorn event loop while the FCM HTTP request is in flight,
+        # causing all other requests to queue up.
+        # Fix: run it in a thread pool so the event loop stays free.
+        response = await asyncio.to_thread(messaging.send, msg)
         print(f"[FCM] ✅ Notification sent to {first_name}: {response}")
     except Exception as e:
-        print(f"[FCM] Send failed: {e}")
+        # Notification failure must NEVER crash the auth flow.
+        print(f"[FCM] Send failed (non-fatal): {e}")

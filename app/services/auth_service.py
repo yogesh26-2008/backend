@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
@@ -57,9 +58,20 @@ async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthR
         "updated_at": datetime.now(timezone.utc),
         "last_login": datetime.now(timezone.utc),
     }
-    result = await db.users.insert_one(doc)
-    doc["_id"] = result.inserted_id
+    try:
+        result = await db.users.insert_one(doc)
+    except DuplicateKeyError as e:
+        # BUG FIX: Race condition — two simultaneous signups with the same
+        # email/username both pass the find_one checks above, then the second
+        # insert hits the unique index and throws DuplicateKeyError.
+        # Previously this would surface as an unhandled 500.
+        key = "email" if "email" in str(e) else "username"
+        raise HTTPException(
+            status_code=400,
+            detail=f"{'Email is already registered' if key == 'email' else 'Username is already taken'}",
+        )
 
+    doc["_id"] = result.inserted_id
     await send_welcome_notification(data.fcm_token, data.name, is_signup=True)
     return _build_auth_response(doc, "Account created successfully. Welcome to Trandia!")
 
@@ -73,10 +85,15 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     if not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    await db.users.update_one(
-        {"_id": user["_id"]},
-        {"$set": {"last_login": datetime.now(timezone.utc), "fcm_token": data.fcm_token}},
-    )
+    # BUG FIX: Was always overwriting fcm_token with data.fcm_token, even
+    # when data.fcm_token is None. This deleted a valid FCM token from the DB
+    # every time a client logged in without sending a token (e.g. web clients),
+    # silently disabling push notifications for that user.
+    update_fields: dict = {"last_login": datetime.now(timezone.utc)}
+    if data.fcm_token:
+        update_fields["fcm_token"] = data.fcm_token
+
+    await db.users.update_one({"_id": user["_id"]}, {"$set": update_fields})
     if data.fcm_token:
         user["fcm_token"] = data.fcm_token
 
@@ -93,27 +110,28 @@ async def auth_with_google_userinfo(
     if not email:
         raise HTTPException(status_code=400, detail="Google account has no email")
 
-    # FIX: Google's /userinfo/v2 returns "id", OpenID token returns "sub"
-    # Handle both so it never KeyErrors
+    # Google's /userinfo/v2 returns "id"; OpenID token returns "sub". Handle both.
     google_id = userinfo.get("sub") or userinfo.get("id") or ""
     name = userinfo.get("name") or email.split("@")[0]
     picture = userinfo.get("picture")
 
     existing = await db.users.find_one({"email": email})
     if existing:
-        await db.users.update_one(
-            {"_id": existing["_id"]},
-            {
-                "$set": {
-                    "last_login": datetime.now(timezone.utc),
-                    "google_id": google_id,
-                    "picture": picture,
-                    "fcm_token": fcm_token,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
-        )
-        existing.update({"picture": picture, "fcm_token": fcm_token})
+        # BUG FIX: Same conditional FCM token update as login_with_email —
+        # only set fcm_token in DB when a new token is actually provided.
+        update_fields: dict = {
+            "last_login": datetime.now(timezone.utc),
+            "google_id": google_id,
+            "picture": picture,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        if fcm_token:
+            update_fields["fcm_token"] = fcm_token
+
+        await db.users.update_one({"_id": existing["_id"]}, {"$set": update_fields})
+        existing.update({"picture": picture})
+        if fcm_token:
+            existing["fcm_token"] = fcm_token
         await send_welcome_notification(fcm_token, existing["name"], is_signup=False)
         return _build_auth_response(existing, "Welcome back to Trandia!")
 
@@ -138,9 +156,22 @@ async def auth_with_google_userinfo(
         "updated_at": datetime.now(timezone.utc),
         "last_login": datetime.now(timezone.utc),
     }
-    result = await db.users.insert_one(doc)
-    doc["_id"] = result.inserted_id
+    try:
+        result = await db.users.insert_one(doc)
+    except DuplicateKeyError as e:
+        # BUG FIX: Race condition — two simultaneous Google logins with the
+        # same email both pass the find_one check, then the second insert hits
+        # the unique email index. Previously this was an unhandled 500.
+        key = "email" if "email" in str(e) else "username"
+        if key == "email":
+            # Re-fetch the now-existing user and return them
+            existing = await db.users.find_one({"email": email})
+            if existing:
+                await send_welcome_notification(fcm_token, existing["name"], is_signup=False)
+                return _build_auth_response(existing, "Welcome back to Trandia!")
+        raise HTTPException(status_code=400, detail="Account already exists")
 
+    doc["_id"] = result.inserted_id
     await send_welcome_notification(fcm_token, name, is_signup=True)
     return _build_auth_response(doc, "Account created with Google. Welcome to Trandia!")
 
