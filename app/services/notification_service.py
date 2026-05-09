@@ -6,6 +6,8 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 
 _initialized = False
+# Keeps references to background tasks so GC doesn't kill them mid-flight
+_pending_tasks: set[asyncio.Task] = set()
 
 
 def init_firebase(cred_path: str):
@@ -13,7 +15,7 @@ def init_firebase(cred_path: str):
     if _initialized:
         return
 
-    # Priority 1: FIREBASE_CREDENTIALS_JSON env var (Railway / cloud deploy)
+    # Priority 1: FIREBASE_CREDENTIALS_JSON env var (Railway)
     json_str = os.environ.get("FIREBASE_CREDENTIALS_JSON", "").strip()
     if json_str:
         try:
@@ -21,46 +23,59 @@ def init_firebase(cred_path: str):
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
             _initialized = True
-            print("[FCM] Firebase Admin SDK initialized (from env var)")
+            print("[FCM] ✅ Firebase Admin SDK initialized (from env var)")
             return
         except Exception as e:
-            print(f"[FCM] WARNING: init from env var failed — {e}")
+            print(f"[FCM] ❌ init from env var failed — {e}")
             return
 
-    # Priority 2: File path (local development)
+    # Priority 2: Local file (dev only)
     if not cred_path or not cred_path.strip():
-        print("[FCM] WARNING: No Firebase credentials — push notifications disabled")
+        print("[FCM] ⚠️  No credentials — push notifications disabled")
         return
 
     path = Path(cred_path)
     if not path.exists():
-        print(f"[FCM] WARNING: credentials file not found at {path.resolve()}")
+        print(f"[FCM] ⚠️  Credentials file not found: {path.resolve()}")
         return
 
     try:
         cred = credentials.Certificate(str(path))
         firebase_admin.initialize_app(cred)
         _initialized = True
-        print("[FCM] Firebase Admin SDK initialized (from file)")
+        print("[FCM] ✅ Firebase Admin SDK initialized (from file)")
     except Exception as e:
-        print(f"[FCM] WARNING: init failed — {e}")
+        print(f"[FCM] ❌ init from file failed — {e}")
 
 
-async def send_welcome_notification(fcm_token: str, name: str, is_signup: bool):
-    """Send a premium welcome notification after signup or login.
+def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: bool):
+    """Fire-and-forget welcome notification.
 
-    Runs the synchronous Firebase send() in a thread pool so the FastAPI
-    event loop is never blocked during the FCM HTTP round-trip.
-    Notification failure is always non-fatal — auth must still succeed.
+    Schedules the send as a background asyncio task so the login/signup
+    API response is returned to Flutter immediately — without waiting for
+    the FCM round-trip to Google's servers.
     """
-    if not _initialized or not fcm_token:
+    if not _initialized:
+        print("[FCM] ⚠️  Not initialized — skipping notification. "
+              "Set FIREBASE_CREDENTIALS_JSON in Railway env vars.")
+        return
+    if not fcm_token:
+        print("[FCM] ⚠️  fcm_token is None — Flutter did not send a token. "
+              "Check FcmService.initAndCache() runs before login.")
         return
 
+    task = asyncio.create_task(_send(fcm_token, name, is_signup))
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
+
+
+async def _send(fcm_token: str, name: str, is_signup: bool):
+    """Actual FCM send — runs as a background task."""
     first_name = name.split()[0] if name else "there"
 
     if is_signup:
         title    = "Welcome to Trandia ✦"
-        subtitle = "Your account is ready"          # shown on iOS between title & body
+        subtitle = "Your account is ready"
         body     = (
             f"Hi {first_name}, you're all set. "
             "Explore conversations, connect with people around you, "
@@ -76,40 +91,28 @@ async def send_welcome_notification(fcm_token: str, name: str, is_signup: bool):
 
     try:
         msg = messaging.Message(
-            # ── Notification payload (shown in system tray) ──────────────────
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
-
-            # ── Android config ───────────────────────────────────────────────
+            notification=messaging.Notification(title=title, body=body),
             android=messaging.AndroidConfig(
                 priority="high",
-                ttl=3600,                            # discard if undelivered after 1 h
+                ttl=3600,
                 notification=messaging.AndroidNotification(
                     title=title,
                     body=body,
                     channel_id="trandia_welcome",
-                    color="#00C853",                 # Trandia green accent
+                    color="#00C853",
                     click_action="FLUTTER_NOTIFICATION_CLICK",
-                    tag="trandia_welcome",           # replaces previous welcome notif
-                    # Notification style: inbox / bigText auto-selected by OS
+                    tag="trandia_welcome",
                     notification_priority=messaging.NotificationPriority.HIGH,
                     visibility=messaging.Visibility.PUBLIC,
                 ),
             ),
-
-            # ── APNs (iOS) config ────────────────────────────────────────────
             apns=messaging.APNSConfig(
-                headers={
-                    "apns-priority": "10",           # immediate delivery
-                    "apns-push-type": "alert",
-                },
+                headers={"apns-priority": "10", "apns-push-type": "alert"},
                 payload=messaging.APNSPayload(
                     aps=messaging.Aps(
                         alert=messaging.ApsAlert(
                             title=title,
-                            subtitle=subtitle,       # iOS shows 3-line hierarchy
+                            subtitle=subtitle,
                             body=body,
                         ),
                         badge=1,
@@ -118,22 +121,18 @@ async def send_welcome_notification(fcm_token: str, name: str, is_signup: bool):
                     )
                 ),
             ),
-
-            # ── Data payload (Flutter can read these in background handler) ──
             data={
                 "type": "welcome",
                 "screen": "home",
                 "event": "signup" if is_signup else "login",
                 "click_action": "FLUTTER_NOTIFICATION_CLICK",
             },
-
             token=fcm_token,
         )
 
-        # messaging.send() is synchronous — run in thread pool
         response = await asyncio.to_thread(messaging.send, msg)
-        print(f"[FCM] ✅ Welcome notification sent → {first_name}: {response}")
+        print(f"[FCM] ✅ Notification sent to {first_name} — {response}")
 
     except Exception as e:
-        # Notification failure must NEVER crash the auth flow
-        print(f"[FCM] Send failed (non-fatal): {e}")
+        print(f"[FCM] ❌ Send failed — {e}")
+        print(f"[FCM]    token prefix: {fcm_token[:30]}...")
