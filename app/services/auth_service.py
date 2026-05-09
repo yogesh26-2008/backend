@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from bson import ObjectId
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 from google.oauth2 import id_token
@@ -11,7 +11,7 @@ from app.config import settings
 from app.models.user import UserCreate, UserLogin, UserResponse, AuthResponse
 from app.utils.jwt_handler import create_access_token
 from app.utils.password import hash_password, verify_password
-from app.services.notification_service import send_welcome_notification
+from app.services.notification_service import schedule_welcome_notification
 
 
 def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
@@ -38,10 +38,6 @@ def _require_db(db: AsyncIOMotorDatabase):
 
 
 async def _verify_google_id_token(token_str: str) -> dict | None:
-    """Run synchronous Google token verification in a thread pool.
-    id_token.verify_oauth2_token() makes a real HTTP call and is fully
-    synchronous — wrapping in to_thread keeps the event loop free.
-    """
     for audience in [settings.google_android_client_id, settings.google_client_id]:
         try:
             result = await asyncio.to_thread(
@@ -68,7 +64,6 @@ async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthR
         "name": data.name,
         "username": data.username,
         "email": data.email,
-        # await — hash_password runs bcrypt in a thread pool (non-blocking)
         "password_hash": await hash_password(data.password),
         "is_google_user": False,
         "google_id": None,
@@ -88,8 +83,10 @@ async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthR
         )
 
     doc["_id"] = result.inserted_id
-    # data.name = jo user ne signup form mein bhara (actual user ka naam)
-    await send_welcome_notification(data.fcm_token, data.name, is_signup=True)
+
+    # Fire-and-forget — response returns immediately, notification sends in background
+    schedule_welcome_notification(data.fcm_token, data.name, is_signup=True)
+
     return _build_auth_response(doc, "Account created successfully. Welcome to Trandia!")
 
 
@@ -100,7 +97,6 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     if not user or not user.get("password_hash"):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    # await — verify_password runs bcrypt.checkpw in a thread pool (non-blocking)
     if not await verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -112,8 +108,9 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     if data.fcm_token:
         user["fcm_token"] = data.fcm_token
 
-    # user["name"] = MongoDB se actual user ka naam
-    await send_welcome_notification(data.fcm_token, user["name"], is_signup=False)
+    # Fire-and-forget — response returns immediately
+    schedule_welcome_notification(data.fcm_token, user["name"], is_signup=False)
+
     return _build_auth_response(user, "Welcome back to Trandia!")
 
 
@@ -145,8 +142,8 @@ async def auth_with_google_userinfo(
         existing.update({"picture": picture})
         if fcm_token:
             existing["fcm_token"] = fcm_token
-        # existing["name"] = database se actual user ka naam
-        await send_welcome_notification(fcm_token, existing["name"], is_signup=False)
+
+        schedule_welcome_notification(fcm_token, existing["name"], is_signup=False)
         return _build_auth_response(existing, "Welcome back to Trandia!")
 
     base_username = email.split("@")[0].lower().replace(".", "")
@@ -176,13 +173,12 @@ async def auth_with_google_userinfo(
         if key == "email":
             existing = await db.users.find_one({"email": email})
             if existing:
-                await send_welcome_notification(fcm_token, existing["name"], is_signup=False)
+                schedule_welcome_notification(fcm_token, existing["name"], is_signup=False)
                 return _build_auth_response(existing, "Welcome back to Trandia!")
         raise HTTPException(status_code=400, detail="Account already exists")
 
     doc["_id"] = result.inserted_id
-    # name = Google account ka naam (actual user ka naam)
-    await send_welcome_notification(fcm_token, name, is_signup=True)
+    schedule_welcome_notification(fcm_token, name, is_signup=True)
     return _build_auth_response(doc, "Account created with Google. Welcome to Trandia!")
 
 
@@ -190,10 +186,7 @@ async def auth_with_google_id_token(
     token_str: str, fcm_token: str | None, db: AsyncIOMotorDatabase
 ) -> AuthResponse:
     _require_db(db)
-
-    # Non-blocking Google token verification
     idinfo = await _verify_google_id_token(token_str)
     if not idinfo:
         raise HTTPException(status_code=401, detail="Invalid Google token")
-
     return await auth_with_google_userinfo(idinfo, fcm_token, db)
