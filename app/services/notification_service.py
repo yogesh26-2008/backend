@@ -6,7 +6,6 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 
 _initialized = False
-# Keeps references to background tasks so GC doesn't kill them mid-flight
 _pending_tasks: set[asyncio.Task] = set()
 
 
@@ -15,7 +14,6 @@ def init_firebase(cred_path: str):
     if _initialized:
         return
 
-    # Priority 1: FIREBASE_CREDENTIALS_JSON env var (Railway)
     json_str = os.environ.get("FIREBASE_CREDENTIALS_JSON", "").strip()
     if json_str:
         try:
@@ -29,7 +27,6 @@ def init_firebase(cred_path: str):
             print(f"[FCM] ❌ init from env var failed — {e}")
             return
 
-    # Priority 2: Local file (dev only)
     if not cred_path or not cred_path.strip():
         print("[FCM] ⚠️  No credentials — push notifications disabled")
         return
@@ -49,19 +46,12 @@ def init_firebase(cred_path: str):
 
 
 def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: bool):
-    """Fire-and-forget welcome notification.
-
-    Schedules the send as a background asyncio task so the login/signup
-    API response is returned to Flutter immediately — without waiting for
-    the FCM round-trip to Google's servers.
-    """
+    """Fire-and-forget — schedules notification as background task."""
     if not _initialized:
-        print("[FCM] ⚠️  Not initialized — skipping notification. "
-              "Set FIREBASE_CREDENTIALS_JSON in Railway env vars.")
+        print("[FCM] ⚠️  Not initialized — set FIREBASE_CREDENTIALS_JSON on Railway")
         return
     if not fcm_token:
-        print("[FCM] ⚠️  fcm_token is None — Flutter did not send a token. "
-              "Check FcmService.initAndCache() runs before login.")
+        print("[FCM] ⚠️  fcm_token is None — Flutter did not send a token")
         return
 
     task = asyncio.create_task(_send(fcm_token, name, is_signup))
@@ -70,7 +60,6 @@ def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: b
 
 
 async def _send(fcm_token: str, name: str, is_signup: bool):
-    """Actual FCM send — runs as a background task."""
     first_name = name.split()[0] if name else "there"
 
     if is_signup:
@@ -91,7 +80,10 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
 
     try:
         msg = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
             android=messaging.AndroidConfig(
                 priority="high",
                 ttl=3600,
@@ -102,8 +94,8 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
                     color="#00C853",
                     click_action="FLUTTER_NOTIFICATION_CLICK",
                     tag="trandia_welcome",
-                    notification_priority=messaging.NotificationPriority.HIGH,
-                    visibility=messaging.Visibility.PUBLIC,
+                    # FIX: Removed NotificationPriority and Visibility —
+                    # these attributes don't exist in firebase-admin==6.6.0
                 ),
             ),
             apns=messaging.APNSConfig(
