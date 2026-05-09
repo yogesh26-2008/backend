@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import HTTPException, status
@@ -29,12 +30,30 @@ def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
 
 
 def _require_db(db: AsyncIOMotorDatabase):
-    """Raise a clear 503 if MongoDB is not connected."""
     if db is None:
         raise HTTPException(
             status_code=503,
             detail="Database not available. Please try again in a moment.",
         )
+
+
+async def _verify_google_id_token(token_str: str) -> dict | None:
+    """Run synchronous Google token verification in a thread pool.
+    id_token.verify_oauth2_token() makes a real HTTP call and is fully
+    synchronous — wrapping in to_thread keeps the event loop free.
+    """
+    for audience in [settings.google_android_client_id, settings.google_client_id]:
+        try:
+            result = await asyncio.to_thread(
+                id_token.verify_oauth2_token,
+                token_str,
+                google_requests.Request(),
+                audience,
+            )
+            return result
+        except ValueError:
+            continue
+    return None
 
 
 async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthResponse:
@@ -49,7 +68,8 @@ async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthR
         "name": data.name,
         "username": data.username,
         "email": data.email,
-        "password_hash": hash_password(data.password),
+        # await — hash_password runs bcrypt in a thread pool (non-blocking)
+        "password_hash": await hash_password(data.password),
         "is_google_user": False,
         "google_id": None,
         "picture": None,
@@ -61,17 +81,14 @@ async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthR
     try:
         result = await db.users.insert_one(doc)
     except DuplicateKeyError as e:
-        # BUG FIX: Race condition — two simultaneous signups with the same
-        # email/username both pass the find_one checks above, then the second
-        # insert hits the unique index and throws DuplicateKeyError.
-        # Previously this would surface as an unhandled 500.
         key = "email" if "email" in str(e) else "username"
         raise HTTPException(
             status_code=400,
-            detail=f"{'Email is already registered' if key == 'email' else 'Username is already taken'}",
+            detail="Email is already registered" if key == "email" else "Username is already taken",
         )
 
     doc["_id"] = result.inserted_id
+    # data.name = jo user ne signup form mein bhara (actual user ka naam)
     await send_welcome_notification(data.fcm_token, data.name, is_signup=True)
     return _build_auth_response(doc, "Account created successfully. Welcome to Trandia!")
 
@@ -82,13 +99,11 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     user = await db.users.find_one({"email": data.email})
     if not user or not user.get("password_hash"):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    if not verify_password(data.password, user["password_hash"]):
+
+    # await — verify_password runs bcrypt.checkpw in a thread pool (non-blocking)
+    if not await verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    # BUG FIX: Was always overwriting fcm_token with data.fcm_token, even
-    # when data.fcm_token is None. This deleted a valid FCM token from the DB
-    # every time a client logged in without sending a token (e.g. web clients),
-    # silently disabling push notifications for that user.
     update_fields: dict = {"last_login": datetime.now(timezone.utc)}
     if data.fcm_token:
         update_fields["fcm_token"] = data.fcm_token
@@ -97,6 +112,7 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     if data.fcm_token:
         user["fcm_token"] = data.fcm_token
 
+    # user["name"] = MongoDB se actual user ka naam
     await send_welcome_notification(data.fcm_token, user["name"], is_signup=False)
     return _build_auth_response(user, "Welcome back to Trandia!")
 
@@ -110,15 +126,12 @@ async def auth_with_google_userinfo(
     if not email:
         raise HTTPException(status_code=400, detail="Google account has no email")
 
-    # Google's /userinfo/v2 returns "id"; OpenID token returns "sub". Handle both.
     google_id = userinfo.get("sub") or userinfo.get("id") or ""
     name = userinfo.get("name") or email.split("@")[0]
     picture = userinfo.get("picture")
 
     existing = await db.users.find_one({"email": email})
     if existing:
-        # BUG FIX: Same conditional FCM token update as login_with_email —
-        # only set fcm_token in DB when a new token is actually provided.
         update_fields: dict = {
             "last_login": datetime.now(timezone.utc),
             "google_id": google_id,
@@ -132,10 +145,10 @@ async def auth_with_google_userinfo(
         existing.update({"picture": picture})
         if fcm_token:
             existing["fcm_token"] = fcm_token
+        # existing["name"] = database se actual user ka naam
         await send_welcome_notification(fcm_token, existing["name"], is_signup=False)
         return _build_auth_response(existing, "Welcome back to Trandia!")
 
-    # Generate unique username from email
     base_username = email.split("@")[0].lower().replace(".", "")
     username = base_username
     counter = 1
@@ -159,12 +172,8 @@ async def auth_with_google_userinfo(
     try:
         result = await db.users.insert_one(doc)
     except DuplicateKeyError as e:
-        # BUG FIX: Race condition — two simultaneous Google logins with the
-        # same email both pass the find_one check, then the second insert hits
-        # the unique email index. Previously this was an unhandled 500.
         key = "email" if "email" in str(e) else "username"
         if key == "email":
-            # Re-fetch the now-existing user and return them
             existing = await db.users.find_one({"email": email})
             if existing:
                 await send_welcome_notification(fcm_token, existing["name"], is_signup=False)
@@ -172,6 +181,7 @@ async def auth_with_google_userinfo(
         raise HTTPException(status_code=400, detail="Account already exists")
 
     doc["_id"] = result.inserted_id
+    # name = Google account ka naam (actual user ka naam)
     await send_welcome_notification(fcm_token, name, is_signup=True)
     return _build_auth_response(doc, "Account created with Google. Welcome to Trandia!")
 
@@ -181,16 +191,8 @@ async def auth_with_google_id_token(
 ) -> AuthResponse:
     _require_db(db)
 
-    idinfo = None
-    for audience in [settings.google_android_client_id, settings.google_client_id]:
-        try:
-            idinfo = id_token.verify_oauth2_token(
-                token_str, google_requests.Request(), audience
-            )
-            break
-        except ValueError:
-            continue
-
+    # Non-blocking Google token verification
+    idinfo = await _verify_google_id_token(token_str)
     if not idinfo:
         raise HTTPException(status_code=401, detail="Invalid Google token")
 

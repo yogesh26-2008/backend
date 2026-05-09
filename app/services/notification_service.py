@@ -47,64 +47,93 @@ def init_firebase(cred_path: str):
 
 
 async def send_welcome_notification(fcm_token: str, name: str, is_signup: bool):
+    """Send a premium welcome notification after signup or login.
+
+    Runs the synchronous Firebase send() in a thread pool so the FastAPI
+    event loop is never blocked during the FCM HTTP round-trip.
+    Notification failure is always non-fatal — auth must still succeed.
+    """
     if not _initialized or not fcm_token:
         return
 
     first_name = name.split()[0] if name else "there"
 
     if is_signup:
-        title = "Welcome to Trandia! 🎉"
-        body = (
-            f"Hey {first_name}, your account is live. "
-            "Start exploring conversations, connect with people, and make your voice heard."
+        title    = "Welcome to Trandia ✦"
+        subtitle = "Your account is ready"          # shown on iOS between title & body
+        body     = (
+            f"Hi {first_name}, you're all set. "
+            "Explore conversations, connect with people around you, "
+            "and make your voice heard."
         )
     else:
-        title = f"Welcome back, {first_name}! 👋"
-        body = (
-            "Great to see you again. "
-            "Your conversations are waiting — jump right back in."
+        title    = f"Welcome back, {first_name} ✦"
+        subtitle = "Great to have you back"
+        body     = (
+            "Your feed, connections, and conversations "
+            "are right where you left them."
         )
 
     try:
         msg = messaging.Message(
+            # ── Notification payload (shown in system tray) ──────────────────
             notification=messaging.Notification(
                 title=title,
                 body=body,
             ),
-            token=fcm_token,
+
+            # ── Android config ───────────────────────────────────────────────
             android=messaging.AndroidConfig(
                 priority="high",
-                ttl=3600,
+                ttl=3600,                            # discard if undelivered after 1 h
                 notification=messaging.AndroidNotification(
-                    channel_id="trandia_auth",
-                    color="#00C853",
+                    title=title,
+                    body=body,
+                    channel_id="trandia_welcome",
+                    color="#00C853",                 # Trandia green accent
                     click_action="FLUTTER_NOTIFICATION_CLICK",
-                    tag="trandia_welcome",
+                    tag="trandia_welcome",           # replaces previous welcome notif
+                    # Notification style: inbox / bigText auto-selected by OS
+                    notification_priority=messaging.NotificationPriority.HIGH,
+                    visibility=messaging.Visibility.PUBLIC,
                 ),
             ),
+
+            # ── APNs (iOS) config ────────────────────────────────────────────
             apns=messaging.APNSConfig(
-                headers={"apns-priority": "10"},
+                headers={
+                    "apns-priority": "10",           # immediate delivery
+                    "apns-push-type": "alert",
+                },
                 payload=messaging.APNSPayload(
                     aps=messaging.Aps(
+                        alert=messaging.ApsAlert(
+                            title=title,
+                            subtitle=subtitle,       # iOS shows 3-line hierarchy
+                            body=body,
+                        ),
                         badge=1,
                         sound="default",
                         content_available=True,
                     )
                 ),
             ),
+
+            # ── Data payload (Flutter can read these in background handler) ──
             data={
                 "type": "welcome",
                 "screen": "home",
+                "event": "signup" if is_signup else "login",
                 "click_action": "FLUTTER_NOTIFICATION_CLICK",
             },
+
+            token=fcm_token,
         )
-        # BUG FIX: messaging.send() is a SYNCHRONOUS call from the Firebase
-        # Admin SDK. Calling it directly inside an async FastAPI route blocks
-        # the entire uvicorn event loop while the FCM HTTP request is in flight,
-        # causing all other requests to queue up.
-        # Fix: run it in a thread pool so the event loop stays free.
+
+        # messaging.send() is synchronous — run in thread pool
         response = await asyncio.to_thread(messaging.send, msg)
-        print(f"[FCM] ✅ Notification sent to {first_name}: {response}")
+        print(f"[FCM] ✅ Welcome notification sent → {first_name}: {response}")
+
     except Exception as e:
-        # Notification failure must NEVER crash the auth flow.
+        # Notification failure must NEVER crash the auth flow
         print(f"[FCM] Send failed (non-fatal): {e}")
