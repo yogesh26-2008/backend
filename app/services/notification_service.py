@@ -10,13 +10,8 @@ from firebase_admin import credentials, messaging
 _initialized = False
 _pending_tasks: set[asyncio.Task] = set()
 
-# BUG FIX #4 — FCM send retry constants.
-# A transient network error, Firebase 500, or quota blip caused the single
-# send() attempt to fail and the notification to be permanently lost.
-# Three attempts with exponential back-off (1 s, 2 s) covers the vast majority
-# of transient failures without delaying the happy-path more than one second.
 _MAX_RETRIES   = 3
-_RETRY_BACKOFF = [1, 2]  # seconds before attempt 2 and 3
+_RETRY_BACKOFF = [1, 2]
 
 
 def init_firebase(cred_path: str):
@@ -47,10 +42,10 @@ def init_firebase(cred_path: str):
 
 def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup: bool):
     if not _initialized:
-        print("[FCM] ⚠️ Not initialized — skipping notification")
+        print("[FCM] ⚠️ Not initialized — skipping")
         return
     if not fcm_token:
-        print("[FCM] ⚠️ fcm_token is None — no device to send to")
+        print("[FCM] ⚠️ No FCM token — skipping")
         return
     task = asyncio.create_task(_send_with_delay(fcm_token, name, is_signup))
     _pending_tasks.add(task)
@@ -58,9 +53,13 @@ def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup
 
 
 async def _send_with_delay(fcm_token: str, name: str, is_signup: bool):
-    # 6 s delay so the notification arrives AFTER the app has navigated to
-    # HomeScreen and the user has time to accept the permission dialog.
-    await asyncio.sleep(6)
+    # ── Delay reduced from 6s → 2s ────────────────────────────────────────
+    # Flutter now shows the local notification IMMEDIATELY (zero delay) from
+    # HomeScreen as soon as permission is confirmed. The backend FCM push is
+    # a BACKUP for background delivery only. 2s is enough for HomeScreen to
+    # load and mark the local notification as shown. The foreground listener
+    # ignores 'welcome' type pushes so no duplicate appears.
+    await asyncio.sleep(2)
     await _send(fcm_token, name, is_signup)
 
 
@@ -72,16 +71,12 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
         subtitle = "Your account is ready"
         body     = (
             f"Hi {first_name}, you're all set. "
-            "Explore conversations, connect with people around you, "
-            "and make your voice heard."
+            "Explore conversations and connect with people around you."
         )
     else:
         title    = f"Welcome back, {first_name} ✦"
         subtitle = "Great to have you back"
-        body     = (
-            "Your feed, connections, and conversations "
-            "are right where you left them."
-        )
+        body     = "Your feed and conversations are right where you left them."
 
     msg = messaging.Message(
         notification=messaging.Notification(title=title, body=body),
@@ -91,9 +86,8 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
             notification=messaging.AndroidNotification(
                 title=title,
                 body=body,
-                # Must match _kChannelId in fcm_service.dart AND
-                # default_notification_channel_id in AndroidManifest.xml
-                channel_id="trandia_ch2",
+                # Updated to match new channel ID in fcm_service.dart
+                channel_id="trandia_ch3",
                 color="#00C853",
                 tag="trandia_welcome",
             ),
@@ -102,9 +96,7 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
             headers={"apns-priority": "10", "apns-push-type": "alert"},
             payload=messaging.APNSPayload(
                 aps=messaging.Aps(
-                    alert=messaging.ApsAlert(
-                        title=title, subtitle=subtitle, body=body,
-                    ),
+                    alert=messaging.ApsAlert(title=title, subtitle=subtitle, body=body),
                     badge=1,
                     sound="default",
                 )
@@ -119,24 +111,17 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
         token=fcm_token,
     )
 
-    # BUG FIX #4 — Retry with exponential back-off.
-    # Previously a single send() failure (network blip, Firebase 503, etc.)
-    # silently dropped the notification with no retry.  Now we attempt up to
-    # _MAX_RETRIES times before giving up, logging each failure.
     last_error: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES):
         try:
             response = await asyncio.to_thread(messaging.send, msg)
             print(f"[FCM] ✅ Sent to {first_name} — {response}")
-            return  # success — exit immediately
+            return
         except Exception as e:
             last_error = e
             if attempt < _MAX_RETRIES - 1:
                 wait = _RETRY_BACKOFF[attempt]
-                print(
-                    f"[FCM] ⚠️ Send attempt {attempt + 1} failed: {e} "
-                    f"— retrying in {wait}s"
-                )
+                print(f"[FCM] ⚠️ Attempt {attempt + 1} failed: {e} — retry in {wait}s")
                 await asyncio.sleep(wait)
 
-    print(f"[FCM] ❌ Send failed after {_MAX_RETRIES} attempts: {last_error}")
+    print(f"[FCM] ❌ Failed after {_MAX_RETRIES} attempts: {last_error}")
