@@ -8,6 +8,14 @@ from firebase_admin import credentials, messaging
 _initialized = False
 _pending_tasks: set[asyncio.Task] = set()
 
+# BUG FIX #4 — FCM send retry constants.
+# A transient network error, Firebase 500, or quota blip caused the single
+# send() attempt to fail and the notification to be permanently lost.
+# Three attempts with exponential back-off (1 s, 2 s) covers the vast majority
+# of transient failures without delaying the happy-path more than one second.
+_MAX_RETRIES   = 3
+_RETRY_BACKOFF = [1, 2]  # seconds before attempt 2 and 3
+
 
 def init_firebase(cred_path: str):
     global _initialized
@@ -37,10 +45,10 @@ def init_firebase(cred_path: str):
 
 def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: bool):
     if not _initialized:
-        print("[FCM] ⚠️ Not initialized")
+        print("[FCM] ⚠️ Not initialized — skipping notification")
         return
     if not fcm_token:
-        print("[FCM] ⚠️ fcm_token is None")
+        print("[FCM] ⚠️ fcm_token is None — no device to send to")
         return
     task = asyncio.create_task(_send_with_delay(fcm_token, name, is_signup))
     _pending_tasks.add(task)
@@ -48,7 +56,8 @@ def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: b
 
 
 async def _send_with_delay(fcm_token: str, name: str, is_signup: bool):
-    # 3s delay so notification arrives after app is stable on HomeScreen
+    # 3 s delay so the notification arrives AFTER the app has navigated to
+    # HomeScreen and the onMessage listener is active.
     await asyncio.sleep(3)
     await _send(fcm_token, name, is_signup)
 
@@ -72,43 +81,60 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
             "are right where you left them."
         )
 
-    try:
-        msg = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
-            android=messaging.AndroidConfig(
-                priority="high",
-                ttl=3600,
-                notification=messaging.AndroidNotification(
-                    title=title,
-                    body=body,
-                    # FIX: Must match _kChannelId in fcm_service.dart AND
-                    # default_notification_channel_id in AndroidManifest.xml
-                    channel_id="trandia_ch1",
-                    color="#00C853",
-                    tag="trandia_welcome",
-                ),
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        android=messaging.AndroidConfig(
+            priority="high",
+            ttl=3600,
+            notification=messaging.AndroidNotification(
+                title=title,
+                body=body,
+                # Must match _kChannelId in fcm_service.dart AND
+                # default_notification_channel_id in AndroidManifest.xml
+                channel_id="trandia_ch1",
+                color="#00C853",
+                tag="trandia_welcome",
             ),
-            apns=messaging.APNSConfig(
-                headers={"apns-priority": "10", "apns-push-type": "alert"},
-                payload=messaging.APNSPayload(
-                    aps=messaging.Aps(
-                        alert=messaging.ApsAlert(
-                            title=title, subtitle=subtitle, body=body,
-                        ),
-                        badge=1,
-                        sound="default",
-                    )
-                ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10", "apns-push-type": "alert"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title=title, subtitle=subtitle, body=body,
+                    ),
+                    badge=1,
+                    sound="default",
+                )
             ),
-            data={
-                "type": "welcome",
-                "event": "signup" if is_signup else "login",
-                "title": title,
-                "body": body,
-            },
-            token=fcm_token,
-        )
-        response = await asyncio.to_thread(messaging.send, msg)
-        print(f"[FCM] ✅ Sent to {first_name} — {response}")
-    except Exception as e:
-        print(f"[FCM] ❌ Send failed: {e}")
+        ),
+        data={
+            "type": "welcome",
+            "event": "signup" if is_signup else "login",
+            "title": title,
+            "body": body,
+        },
+        token=fcm_token,
+    )
+
+    # BUG FIX #4 — Retry with exponential back-off.
+    # Previously a single send() failure (network blip, Firebase 503, etc.)
+    # silently dropped the notification with no retry.  Now we attempt up to
+    # _MAX_RETRIES times before giving up, logging each failure.
+    last_error: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = await asyncio.to_thread(messaging.send, msg)
+            print(f"[FCM] ✅ Sent to {first_name} — {response}")
+            return  # success — exit immediately
+        except Exception as e:
+            last_error = e
+            if attempt < _MAX_RETRIES - 1:
+                wait = _RETRY_BACKOFF[attempt]
+                print(
+                    f"[FCM] ⚠️ Send attempt {attempt + 1} failed: {e} "
+                    f"— retrying in {wait}s"
+                )
+                await asyncio.sleep(wait)
+
+    print(f"[FCM] ❌ Send failed after {_MAX_RETRIES} attempts: {last_error}")
