@@ -91,7 +91,7 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
                 body=body,
                 # Must match _kChannelId in fcm_service.dart AND
                 # default_notification_channel_id in AndroidManifest.xml
-                channel_id="trandia_ch1",
+                channel_id="trandia_ch2",
                 color="#00C853",
                 tag="trandia_welcome",
             ),
