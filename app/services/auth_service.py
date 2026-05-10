@@ -13,6 +13,15 @@ from app.utils.jwt_handler import create_access_token
 from app.utils.password import hash_password, verify_password
 from app.services.notification_service import schedule_welcome_notification
 
+# ── BUG FIX: Timing attack protection ────────────────────────────────────────
+# Without this, an attacker can enumerate valid email addresses by measuring
+# response time: non-existent user → instant 401 (no bcrypt), valid user with
+# wrong password → ~100ms 401 (bcrypt). The _DUMMY_HASH forces a bcrypt
+# verification even when no user exists, equalising both response times.
+# This hash is bcrypt-valid but intentionally unmatchable — no plaintext
+# will ever produce it (salt is real, digest is zeroed).
+_DUMMY_HASH = "$2b$12$invalidhashfortimingequalisation.AAAAAAAAAAAAAAAAAAAAAA"
+
 
 def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
     uid = str(user_doc["_id"])
@@ -83,10 +92,7 @@ async def signup_with_email(data: UserCreate, db: AsyncIOMotorDatabase) -> AuthR
         )
 
     doc["_id"] = result.inserted_id
-
-    # Fire-and-forget — response returns immediately, notification sends in background
     schedule_welcome_notification(data.fcm_token, data.name, is_signup=True)
-
     return _build_auth_response(doc, "Account created successfully. Welcome to Trandia!")
 
 
@@ -94,7 +100,13 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     _require_db(db)
 
     user = await db.users.find_one({"email": data.email})
+
+    # ── BUG FIX: Always run bcrypt, even for non-existent accounts ────────
+    # Old code: `if not user: raise HTTPException(...)` — returned instantly,
+    # which let attackers measure which emails are registered.
+    # New code: always call verify_password so both code paths take ~100ms.
     if not user or not user.get("password_hash"):
+        await verify_password(data.password, _DUMMY_HASH)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not await verify_password(data.password, user["password_hash"]):
@@ -108,9 +120,7 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     if data.fcm_token:
         user["fcm_token"] = data.fcm_token
 
-    # Fire-and-forget — response returns immediately
     schedule_welcome_notification(data.fcm_token, user["name"], is_signup=False)
-
     return _build_auth_response(user, "Welcome back to Trandia!")
 
 

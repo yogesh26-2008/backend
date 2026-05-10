@@ -3,8 +3,16 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
+# BUG FIX: slowapi was never wired to the app.
+# limiter.py existed but was never imported or registered here, meaning ALL
+# @limiter.limit() decorators on auth routes were completely inactive — any
+# attacker could spam login/signup with unlimited requests.
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
 from app.config import settings
 from app.database import connect_db, close_db
+from app.limiter import limiter
 from app.services.notification_service import init_firebase
 from app.routes import auth, users
 
@@ -111,6 +119,13 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# ── Rate limiting ─────────────────────────────────────────────────────────
+# BUG FIX: These two lines were completely missing.
+# Without them every @limiter.limit() decorator on auth routes was silently
+# ignored — unlimited login/signup attempts were possible.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS ──────────────────────────────────────────────────────
 # allow_credentials=True + allow_origins=["*"] is INVALID per CORS spec.
