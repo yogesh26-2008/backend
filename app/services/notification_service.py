@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from typing import Optional
+
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -43,7 +45,7 @@ def init_firebase(cred_path: str):
         print("[FCM] ⚠️ No credentials — notifications disabled")
 
 
-def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: bool):
+def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup: bool):
     if not _initialized:
         print("[FCM] ⚠️ Not initialized — skipping notification")
         return
@@ -56,9 +58,9 @@ def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: b
 
 
 async def _send_with_delay(fcm_token: str, name: str, is_signup: bool):
-    # 3 s delay so the notification arrives AFTER the app has navigated to
-    # HomeScreen and the onMessage listener is active.
-    await asyncio.sleep(3)
+    # 6 s delay so the notification arrives AFTER the app has navigated to
+    # HomeScreen and the user has time to accept the permission dialog.
+    await asyncio.sleep(6)
     await _send(fcm_token, name, is_signup)
 
 
@@ -121,7 +123,7 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
     # Previously a single send() failure (network blip, Firebase 503, etc.)
     # silently dropped the notification with no retry.  Now we attempt up to
     # _MAX_RETRIES times before giving up, logging each failure.
-    last_error: Exception | None = None
+    last_error: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES):
         try:
             response = await asyncio.to_thread(messaging.send, msg)
