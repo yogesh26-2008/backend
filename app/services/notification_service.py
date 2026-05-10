@@ -54,26 +54,36 @@ def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: b
         print("[FCM] ⚠️  fcm_token is None — Flutter did not send a token")
         return
 
-    task = asyncio.create_task(_send(fcm_token, name, is_signup))
+    task = asyncio.create_task(_send_with_delay(fcm_token, name, is_signup))
     _pending_tasks.add(task)
     task.add_done_callback(_pending_tasks.discard)
+
+
+async def _send_with_delay(fcm_token: str, name: str, is_signup: bool):
+    # FIX: Wait 3 seconds before sending.
+    # Without delay, notification arrives while Flutter is mid-navigation
+    # (login → home screen). The onMessage listener misses it because the
+    # widget tree is being rebuilt. After 3s the app is stable on HomeScreen
+    # and the foreground handler correctly shows the local notification.
+    await asyncio.sleep(3)
+    await _send(fcm_token, name, is_signup)
 
 
 async def _send(fcm_token: str, name: str, is_signup: bool):
     first_name = name.split()[0] if name else "there"
 
     if is_signup:
-        title    = "Welcome to Trandia ✦"
+        title = "Welcome to Trandia ✦"
         subtitle = "Your account is ready"
-        body     = (
+        body = (
             f"Hi {first_name}, you're all set. "
             "Explore conversations, connect with people around you, "
             "and make your voice heard."
         )
     else:
-        title    = f"Welcome back, {first_name} ✦"
+        title = f"Welcome back, {first_name} ✦"
         subtitle = "Great to have you back"
-        body     = (
+        body = (
             "Your feed, connections, and conversations "
             "are right where you left them."
         )
@@ -94,8 +104,6 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
                     color="#00C853",
                     click_action="FLUTTER_NOTIFICATION_CLICK",
                     tag="trandia_welcome",
-                    # FIX: Removed NotificationPriority and Visibility —
-                    # these attributes don't exist in firebase-admin==6.6.0
                 ),
             ),
             apns=messaging.APNSConfig(
@@ -127,4 +135,4 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
 
     except Exception as e:
         print(f"[FCM] ❌ Send failed — {e}")
-        print(f"[FCM]    token prefix: {fcm_token[:30]}...")
+        print(f"[FCM]    token: {fcm_token[:30]}...")
