@@ -13,58 +13,42 @@ def init_firebase(cred_path: str):
     global _initialized
     if _initialized:
         return
-
     json_str = os.environ.get("FIREBASE_CREDENTIALS_JSON", "").strip()
     if json_str:
         try:
-            cred_dict = json.loads(json_str)
-            cred = credentials.Certificate(cred_dict)
+            cred = credentials.Certificate(json.loads(json_str))
             firebase_admin.initialize_app(cred)
             _initialized = True
-            print("[FCM] ✅ Firebase Admin SDK initialized (from env var)")
+            print("[FCM] ✅ Firebase initialized (env var)")
             return
         except Exception as e:
-            print(f"[FCM] ❌ init from env var failed — {e}")
+            print(f"[FCM] ❌ init failed: {e}")
             return
-
-    if not cred_path or not cred_path.strip():
-        print("[FCM] ⚠️  No credentials — push notifications disabled")
-        return
-
-    path = Path(cred_path)
-    if not path.exists():
-        print(f"[FCM] ⚠️  Credentials file not found: {path.resolve()}")
-        return
-
-    try:
-        cred = credentials.Certificate(str(path))
-        firebase_admin.initialize_app(cred)
-        _initialized = True
-        print("[FCM] ✅ Firebase Admin SDK initialized (from file)")
-    except Exception as e:
-        print(f"[FCM] ❌ init from file failed — {e}")
+    if cred_path and Path(cred_path).exists():
+        try:
+            firebase_admin.initialize_app(credentials.Certificate(cred_path))
+            _initialized = True
+            print("[FCM] ✅ Firebase initialized (file)")
+        except Exception as e:
+            print(f"[FCM] ❌ init failed: {e}")
+    else:
+        print("[FCM] ⚠️ No credentials — notifications disabled")
 
 
 def schedule_welcome_notification(fcm_token: str | None, name: str, is_signup: bool):
-    """Fire-and-forget — schedules notification as background task."""
     if not _initialized:
-        print("[FCM] ⚠️  Not initialized — set FIREBASE_CREDENTIALS_JSON on Railway")
+        print("[FCM] ⚠️ Not initialized")
         return
     if not fcm_token:
-        print("[FCM] ⚠️  fcm_token is None — Flutter did not send a token")
+        print("[FCM] ⚠️ fcm_token is None")
         return
-
     task = asyncio.create_task(_send_with_delay(fcm_token, name, is_signup))
     _pending_tasks.add(task)
     task.add_done_callback(_pending_tasks.discard)
 
 
 async def _send_with_delay(fcm_token: str, name: str, is_signup: bool):
-    # FIX: Wait 3 seconds before sending.
-    # Without delay, notification arrives while Flutter is mid-navigation
-    # (login → home screen). The onMessage listener misses it because the
-    # widget tree is being rebuilt. After 3s the app is stable on HomeScreen
-    # and the foreground handler correctly shows the local notification.
+    # 3s delay so notification arrives after app is stable on HomeScreen
     await asyncio.sleep(3)
     await _send(fcm_token, name, is_signup)
 
@@ -73,36 +57,34 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
     first_name = name.split()[0] if name else "there"
 
     if is_signup:
-        title = "Welcome to Trandia ✦"
+        title    = "Welcome to Trandia ✦"
         subtitle = "Your account is ready"
-        body = (
+        body     = (
             f"Hi {first_name}, you're all set. "
             "Explore conversations, connect with people around you, "
             "and make your voice heard."
         )
     else:
-        title = f"Welcome back, {first_name} ✦"
+        title    = f"Welcome back, {first_name} ✦"
         subtitle = "Great to have you back"
-        body = (
+        body     = (
             "Your feed, connections, and conversations "
             "are right where you left them."
         )
 
     try:
         msg = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
+            notification=messaging.Notification(title=title, body=body),
             android=messaging.AndroidConfig(
                 priority="high",
                 ttl=3600,
                 notification=messaging.AndroidNotification(
                     title=title,
                     body=body,
-                    channel_id="trandia_welcome",
+                    # FIX: Must match _kChannelId in fcm_service.dart AND
+                    # default_notification_channel_id in AndroidManifest.xml
+                    channel_id="trandia_ch1",
                     color="#00C853",
-                    click_action="FLUTTER_NOTIFICATION_CLICK",
                     tag="trandia_welcome",
                 ),
             ),
@@ -111,28 +93,22 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
                 payload=messaging.APNSPayload(
                     aps=messaging.Aps(
                         alert=messaging.ApsAlert(
-                            title=title,
-                            subtitle=subtitle,
-                            body=body,
+                            title=title, subtitle=subtitle, body=body,
                         ),
                         badge=1,
                         sound="default",
-                        content_available=True,
                     )
                 ),
             ),
             data={
                 "type": "welcome",
-                "screen": "home",
                 "event": "signup" if is_signup else "login",
-                "click_action": "FLUTTER_NOTIFICATION_CLICK",
+                "title": title,
+                "body": body,
             },
             token=fcm_token,
         )
-
         response = await asyncio.to_thread(messaging.send, msg)
-        print(f"[FCM] ✅ Notification sent to {first_name} — {response}")
-
+        print(f"[FCM] ✅ Sent to {first_name} — {response}")
     except Exception as e:
-        print(f"[FCM] ❌ Send failed — {e}")
-        print(f"[FCM]    token: {fcm_token[:30]}...")
+        print(f"[FCM] ❌ Send failed: {e}")
