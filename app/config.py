@@ -17,10 +17,12 @@ class Settings(BaseSettings):
 
     firebase_credentials_path: str = ""
 
+    # Firebase Web API Key — used to verify ID tokens via REST API
+    firebase_web_api_key: str = "AIzaSyAhm2d0jnljLoNxqhgXdKFkbUswIfCiEB4"
+
     app_secret_key: str
     allowed_origins: str = ""
 
-    # ── Brevo Email API ───────────────────────────────────────────────────────
     brevo_api_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
