@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     app_secret_key: str
     allowed_origins: str = ""
 
-    # ── Resend Email API ──────────────────────────────────────────────────────
-    resend_api_key: str = ""
+    # ── Brevo Email API ───────────────────────────────────────────────────────
+    brevo_api_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
