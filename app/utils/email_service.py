@@ -1,19 +1,12 @@
-import aiosmtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-
+import httpx
 from app.config import settings
 
 
-def _is_smtp_configured() -> bool:
-    return bool(settings.smtp_username and settings.smtp_password and settings.smtp_from)
-
-
 async def send_otp_email(to_email: str, otp: str, name: str) -> None:
-    """Send a 6-digit OTP verification email."""
-    if not _is_smtp_configured():
-        # In local dev without SMTP configured, just print the OTP
-        print(f"[EMAIL] ⚠️  SMTP not configured. OTP for {to_email}: {otp}")
+    """Send a 6-digit OTP verification email via Resend API."""
+
+    if not settings.resend_api_key:
+        print(f"[EMAIL] ⚠️  RESEND_API_KEY not set. OTP for {to_email}: {otp}")
         return
 
     html = f"""
@@ -39,8 +32,7 @@ async def send_otp_email(to_email: str, otp: str, name: str) -> None:
                 Namaste <strong style="color:#fafafa">{name}</strong>! 👋
               </p>
               <p style="color:#aaa;font-size:15px;margin:16px 0 0">
-                Apna Trandia account verify karne ke liye neeche diya gaya
-                OTP use karo:
+                Apna Trandia account verify karne ke liye neeche diya gaya OTP use karo:
               </p>
             </td>
           </tr>
@@ -79,18 +71,20 @@ async def send_otp_email(to_email: str, otp: str, name: str) -> None:
 </html>
 """
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Trandia — Your verification code is {otp} 🔐"
-    msg["From"] = settings.smtp_from
-    msg["To"] = to_email
-    msg.attach(MIMEText(html, "html", "utf-8"))
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {settings.resend_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": "Trandia <onboarding@resend.dev>",
+                "to": [to_email],
+                "subject": f"Trandia — Your verification code is {otp} 🔐",
+                "html": html,
+            },
+        )
 
-    await aiosmtplib.send(
-        msg,
-        hostname=settings.smtp_host,
-        port=settings.smtp_port,
-        username=settings.smtp_username,
-        password=settings.smtp_password,
-        start_tls=True,
-        timeout=15,
-    )
+    if response.status_code not in (200, 201):
+        raise Exception(f"Resend API error {response.status_code}: {response.text}")
