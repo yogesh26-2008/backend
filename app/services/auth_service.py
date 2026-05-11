@@ -1,12 +1,11 @@
 import asyncio
+import httpx
 from datetime import datetime, timezone
-from bson import ObjectId
 from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-from firebase_admin import auth as firebase_admin_auth
 from typing import Optional
 
 from app.config import settings
@@ -41,6 +40,30 @@ def _require_db(db: AsyncIOMotorDatabase):
         )
 
 
+async def _verify_firebase_id_token(id_token_str: str) -> dict:
+    """
+    Verify Firebase ID token using Firebase REST API.
+    No firebase-admin initialization required.
+    Returns user info dict with email and email_verified fields.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:lookup"
+            f"?key={settings.firebase_web_api_key}",
+            json={"idToken": id_token_str},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+
+    data = resp.json()
+    users = data.get("users", [])
+    if not users:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+
+    return users[0]
+
+
 async def _verify_google_id_token(token_str: str) -> dict | None:
     for audience in [settings.google_android_client_id, settings.google_client_id]:
         try:
@@ -61,29 +84,19 @@ async def _verify_google_id_token(token_str: str) -> dict | None:
 async def signup_with_firebase_verified_email(
     data: FirebaseSignupRequest, db: AsyncIOMotorDatabase
 ) -> AuthResponse:
-    """
-    Called after Firebase email verification is complete.
-    Verifies the Firebase ID token, checks email_verified=True,
-    then creates the actual Trandia account in MongoDB.
-    """
     _require_db(db)
 
-    # Verify Firebase ID token
-    try:
-        decoded = await asyncio.to_thread(
-            firebase_admin_auth.verify_id_token, data.firebase_id_token
-        )
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+    # Verify Firebase ID token via REST API
+    firebase_user = await _verify_firebase_id_token(data.firebase_id_token)
 
     # Must be email-verified
-    if not decoded.get("email_verified"):
+    if not firebase_user.get("emailVerified"):
         raise HTTPException(
             status_code=400,
             detail="Email not verified yet. Please click the link in your email first.",
         )
 
-    email = decoded.get("email")
+    email = firebase_user.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Could not get email from token")
 
@@ -173,12 +186,10 @@ async def auth_with_google_userinfo(
         }
         if fcm_token:
             update_fields["fcm_token"] = fcm_token
-
         await db.users.update_one({"_id": existing["_id"]}, {"$set": update_fields})
         existing.update({"picture": picture})
         if fcm_token:
             existing["fcm_token"] = fcm_token
-
         schedule_welcome_notification(fcm_token, existing["name"], is_signup=False)
         return _build_auth_response(existing, "Welcome back to Trandia!")
 
