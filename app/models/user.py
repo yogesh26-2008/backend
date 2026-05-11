@@ -56,3 +56,29 @@ class AuthResponse(BaseModel):
     token_type: str = "bearer"
     user: UserResponse
     message: str
+
+
+# ── Email Verification Models ─────────────────────────────────────────────────
+
+class SignupInitiateResponse(BaseModel):
+    """Returned after step-1 of signup — OTP has been sent."""
+    message: str
+    email: str
+
+
+class VerifyEmailRequest(BaseModel):
+    """Sent by Flutter in step-2 — user enters the OTP they received."""
+    email: EmailStr
+    otp: str
+
+    @field_validator("otp")
+    @classmethod
+    def otp_must_be_digits(cls, v: str) -> str:
+        v = v.strip()
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError("OTP must be exactly 6 digits")
+        return v
+
+
+class ResendOtpRequest(BaseModel):
+    email: EmailStr

@@ -9,7 +9,15 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature
 from app.config import settings
 from app.database import get_db
 from app.limiter import limiter
-from app.models.user import UserCreate, UserLogin, GoogleTokenRequest, AuthResponse
+from app.models.user import (
+    UserCreate,
+    UserLogin,
+    GoogleTokenRequest,
+    AuthResponse,
+    SignupInitiateResponse,
+    VerifyEmailRequest,
+    ResendOtpRequest,
+)
 from app.services import auth_service
 
 router = APIRouter()
@@ -19,7 +27,6 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
-# Open-redirect protection: only trust origins from the whitelist + localhost.
 _ALLOWED_ORIGINS: set[str] = set(
     o.strip() for o in settings.allowed_origins.split(",") if o.strip()
 )
@@ -36,27 +43,47 @@ def _is_safe_origin(origin: str) -> bool:
     return False
 
 
-# ── BUG FIX: Rate limiting was defined in limiter.py but NEVER applied to
-# any endpoint. All auth routes below now have strict limits.
-# Limits chosen to stop brute-force and credential-stuffing attacks while
-# being invisible to legitimate users:
-#   - signup:         5 per minute  (new accounts take time in real use)
-#   - login:         10 per minute  (fast typers + password managers)
-#   - google/verify: 10 per minute  (same as login)
-#   - google/web:    20 per minute  (browser redirect, less sensitive)
-# ─────────────────────────────────────────────────────────────────────────
+# ── Email Signup — Step 1: Send OTP ──────────────────────────────────────────
 
-@router.post("/signup", response_model=AuthResponse)
+@router.post("/signup/initiate", response_model=SignupInitiateResponse)
 @limiter.limit("5/minute")
-async def signup(request: Request, data: UserCreate, db=Depends(get_db)):
-    return await auth_service.signup_with_email(data, db)
+async def signup_initiate(request: Request, data: UserCreate, db=Depends(get_db)):
+    """
+    Step 1: Validate form data, send a 6-digit OTP to the email.
+    No account is created at this stage.
+    """
+    return await auth_service.initiate_signup(data, db)
 
+
+# ── Email Signup — Step 2: Verify OTP & Create Account ───────────────────────
+
+@router.post("/signup/verify", response_model=AuthResponse)
+@limiter.limit("10/minute")
+async def signup_verify(request: Request, data: VerifyEmailRequest, db=Depends(get_db)):
+    """
+    Step 2: Verify the OTP. On success, create the account and return a token.
+    """
+    return await auth_service.verify_email_otp(data.email, data.otp, db)
+
+
+# ── Resend OTP ────────────────────────────────────────────────────────────────
+
+@router.post("/signup/resend", response_model=SignupInitiateResponse)
+@limiter.limit("3/minute")
+async def signup_resend_otp(request: Request, data: ResendOtpRequest, db=Depends(get_db)):
+    """Resend a fresh OTP to the given email (max 3 per minute)."""
+    return await auth_service.resend_otp(data.email, db)
+
+
+# ── Login ─────────────────────────────────────────────────────────────────────
 
 @router.post("/login", response_model=AuthResponse)
 @limiter.limit("10/minute")
 async def login(request: Request, data: UserLogin, db=Depends(get_db)):
     return await auth_service.login_with_email(data, db)
 
+
+# ── Google Auth ───────────────────────────────────────────────────────────────
 
 @router.post("/google/verify", response_model=AuthResponse)
 @limiter.limit("10/minute")
@@ -68,11 +95,6 @@ async def google_verify(request: Request, data: GoogleTokenRequest, db=Depends(g
 @router.get("/google/web")
 @limiter.limit("20/minute")
 async def google_web_login(request: Request, app_origin: str = ""):
-    """
-    Redirect browser to Google consent screen.
-    app_origin: the Flutter web app's origin (e.g. http://localhost:59236)
-    so the callback knows where to redirect back after auth.
-    """
     if app_origin and not _is_safe_origin(app_origin):
         raise HTTPException(status_code=400, detail="Untrusted app_origin")
 
@@ -99,15 +121,12 @@ async def google_callback(
     error: str = None,
     db=Depends(get_db),
 ):
-    """Handle Google OAuth2 callback and redirect back to Flutter app."""
-
     def error_redirect(msg: str, origin: str = "") -> RedirectResponse:
         base = origin if (origin and _is_safe_origin(origin)) else ""
         return RedirectResponse(f"{base}/?error={urllib.parse.quote(msg, safe='')}")
 
     if error:
         return error_redirect(error)
-
     if not state or not code:
         return error_redirect("missing_state_or_code")
 

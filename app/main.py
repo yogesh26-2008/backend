@@ -3,10 +3,6 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
-# BUG FIX: slowapi was never wired to the app.
-# limiter.py existed but was never imported or registered here, meaning ALL
-# @limiter.limit() decorators on auth routes were completely inactive — any
-# attacker could spam login/signup with unlimited requests.
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -43,6 +39,8 @@ input{width:100%;background:#080808;border:1px solid #1e1e1e;border-radius:8px;
 input:focus{outline:none;border-color:#00c853}
 .btn{width:100%;padding:13px;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;transition:.2s;margin-top:2px}
 .btn-green{background:#00c853;color:#000}.btn-green:hover{background:#00e676}
+.btn-outline{background:transparent;color:#00c853;border:1px solid #00c853;margin-top:8px}
+.btn-outline:hover{background:#00c85322}
 .btn-dark{background:#141414;color:#ddd;border:1px solid #272727;display:flex;align-items:center;justify-content:center;gap:9px}
 .btn-dark:hover{background:#1c1c1c;border-color:#333}
 .sep{display:flex;align-items:center;gap:10px;margin:18px 0;color:#2a2a2a;font-size:12px}
@@ -52,6 +50,8 @@ input:focus{outline:none;border-color:#00c853}
 .box-title{font-size:12px;font-weight:700;color:#00c853;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
 .box.err .box-title{color:#f44336}
 pre{font-size:11px;color:#666;white-space:pre-wrap;word-break:break-all;line-height:1.6}
+.step{display:none}.step.active{display:block}
+.otp-info{background:#0a1a0a;border:1px solid #1a3a1a;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#6a6;line-height:1.6}
 </style>
 </head>
 <body>
@@ -63,24 +63,39 @@ pre{font-size:11px;color:#666;white-space:pre-wrap;word-break:break-all;line-hei
       <button class="tab" onclick="tab('login',this)">Sign In</button>
       <button class="tab" onclick="tab('signup',this)">Sign Up</button>
     </div>
+
     <div id="pane-google" class="pane active">
       <p class="hint">Sign in with your Google account.</p>
       <a href="/auth/google/web" style="text-decoration:none">
         <button class="btn btn-dark" style="width:100%">Continue with Google</button>
       </a>
     </div>
+
     <div id="pane-login" class="pane">
       <label>Email</label><input type="email" id="l-email" placeholder="you@example.com">
       <label>Password</label><input type="password" id="l-pass" placeholder="••••••••">
       <button class="btn btn-green" onclick="doLogin()">Sign In</button>
     </div>
+
     <div id="pane-signup" class="pane">
-      <label>Full Name</label><input type="text" id="s-name" placeholder="Yogesh Kumar">
-      <label>Username</label><input type="text" id="s-user" placeholder="yogesh_k">
-      <label>Email</label><input type="email" id="s-email" placeholder="you@example.com">
-      <label>Password</label><input type="password" id="s-pass" placeholder="min 6 characters">
-      <button class="btn btn-green" onclick="doSignup()">Create Account</button>
+      <!-- Step 1: Fill form -->
+      <div id="s-step1" class="step active">
+        <label>Full Name</label><input type="text" id="s-name" placeholder="Yogesh Kumar">
+        <label>Username</label><input type="text" id="s-user" placeholder="yogesh_k">
+        <label>Email</label><input type="email" id="s-email" placeholder="you@example.com">
+        <label>Password</label><input type="password" id="s-pass" placeholder="min 6 characters">
+        <button class="btn btn-green" onclick="doSignupInitiate()">Send Verification OTP</button>
+      </div>
+      <!-- Step 2: Enter OTP -->
+      <div id="s-step2" class="step">
+        <div class="otp-info" id="s-otp-info">OTP sent! Check your inbox.</div>
+        <label>Enter 6-digit OTP</label>
+        <input type="text" id="s-otp" placeholder="••••••" maxlength="6" style="font-size:22px;letter-spacing:8px;text-align:center">
+        <button class="btn btn-green" onclick="doSignupVerify()">Verify & Create Account</button>
+        <button class="btn btn-outline" onclick="doResendOtp()">Resend OTP</button>
+      </div>
     </div>
+
     <div id="result" class="box">
       <div class="box-title" id="rtitle">Result</div>
       <pre id="rcontent"></pre>
@@ -88,10 +103,74 @@ pre{font-size:11px;color:#666;white-space:pre-wrap;word-break:break-all;line-hei
   </div>
 </div>
 <script>
-function tab(n,el){document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('pane-'+n).classList.add('active');el.classList.add('active');}
-function show(ok,d){const b=document.getElementById('result');b.style.display='block';b.className='box'+(ok?'':' err');document.getElementById('rtitle').textContent=ok?'Success':'Failed';document.getElementById('rcontent').textContent=typeof d==='string'?d:JSON.stringify(d,null,2);}
-async function doLogin(){try{const r=await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:document.getElementById('l-email').value,password:document.getElementById('l-pass').value})});show(r.ok,await r.json());}catch(e){show(false,e.message);}}
-async function doSignup(){try{const r=await fetch('/auth/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:document.getElementById('s-name').value,username:document.getElementById('s-user').value,email:document.getElementById('s-email').value,password:document.getElementById('s-pass').value})});show(r.ok,await r.json());}catch(e){show(false,e.message);}}
+let _signupEmail = '';
+
+function tab(n,el){
+  document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('pane-'+n).classList.add('active');
+  el.classList.add('active');
+}
+
+function show(ok,d){
+  const b=document.getElementById('result');
+  b.style.display='block';
+  b.className='box'+(ok?'':' err');
+  document.getElementById('rtitle').textContent=ok?'Success':'Failed';
+  document.getElementById('rcontent').textContent=typeof d==='string'?d:JSON.stringify(d,null,2);
+}
+
+function showStep(n){
+  document.querySelectorAll('.step').forEach(s=>s.classList.remove('active'));
+  document.getElementById('s-step'+n).classList.add('active');
+}
+
+async function doLogin(){
+  try{
+    const r=await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email:document.getElementById('l-email').value,password:document.getElementById('l-pass').value})});
+    show(r.ok,await r.json());
+  }catch(e){show(false,e.message);}
+}
+
+async function doSignupInitiate(){
+  try{
+    const r=await fetch('/auth/signup/initiate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        name:document.getElementById('s-name').value,
+        username:document.getElementById('s-user').value,
+        email:document.getElementById('s-email').value,
+        password:document.getElementById('s-pass').value
+      })});
+    const data=await r.json();
+    if(r.ok){
+      _signupEmail=data.email;
+      document.getElementById('s-otp-info').textContent='OTP sent to '+data.email+'. Check your inbox (also check spam).';
+      showStep(2);
+      show(true,data);
+    }else{show(false,data);}
+  }catch(e){show(false,e.message);}
+}
+
+async function doSignupVerify(){
+  try{
+    const r=await fetch('/auth/signup/verify',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email:_signupEmail,otp:document.getElementById('s-otp').value})});
+    const data=await r.json();
+    show(r.ok,data);
+    if(r.ok){showStep(1);}
+  }catch(e){show(false,e.message);}
+}
+
+async function doResendOtp(){
+  try{
+    const r=await fetch('/auth/signup/resend',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email:_signupEmail})});
+    const data=await r.json();
+    show(r.ok,data);
+  }catch(e){show(false,e.message);}
+}
+
 const p=new URLSearchParams(location.search);
 if(p.get('token')){try{show(true,{access_token:p.get('token'),user:JSON.parse(decodeURIComponent(p.get('user')||'{}'))});}catch{show(true,{access_token:p.get('token')});}history.replaceState({},'','/');}
 if(p.get('error')){show(false,{error:decodeURIComponent(p.get('error'))});history.replaceState({},'','/');}
@@ -120,16 +199,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── Rate limiting ─────────────────────────────────────────────────────────
-# BUG FIX: These two lines were completely missing.
-# Without them every @limiter.limit() decorator on auth routes was silently
-# ignored — unlimited login/signup attempts were possible.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ── CORS ──────────────────────────────────────────────────────
-# allow_credentials=True + allow_origins=["*"] is INVALID per CORS spec.
-# We use Bearer tokens, NOT cookies, so allow_credentials=False is correct.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -139,10 +211,6 @@ app.add_middleware(
 )
 
 
-# ── Global exception handler ─────────────────────────────────
-# Without this, unhandled exceptions (like MongoDB down) return a 500
-# WITHOUT CORS headers, so the browser shows "CORS error" instead of
-# the real error. This handler ensures CORS headers are always present.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     print(f"[ERROR] {request.method} {request.url.path} → {type(exc).__name__}: {exc}")
