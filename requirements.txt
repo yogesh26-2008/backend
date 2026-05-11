@@ -16,4 +16,3 @@ python-multipart==0.0.12
 certifi
 truststore
 slowapi==0.1.9
-aiosmtplib==3.0.1

@@ -18,15 +18,10 @@ class Settings(BaseSettings):
     firebase_credentials_path: str = ""
 
     app_secret_key: str
-
     allowed_origins: str = ""
 
-    # ── SMTP / Email ──────────────────────────────────────────────────────────
-    smtp_host: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    smtp_username: str = ""
-    smtp_password: str = ""
-    smtp_from: str = ""
+    # ── Resend Email API ──────────────────────────────────────────────────────
+    resend_api_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
