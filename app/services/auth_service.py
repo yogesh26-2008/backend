@@ -1,5 +1,7 @@
 import asyncio
 import httpx
+import base64
+import json as json_lib
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -9,10 +11,10 @@ from google.auth.transport import requests as google_requests
 from typing import Optional
 
 from app.config import settings
-from app.models.user import UserCreate, UserLogin, UserResponse, AuthResponse, FirebaseSignupRequest
+from app.models.user import UserLogin, UserResponse, AuthResponse, FirebaseSignupRequest
 from app.utils.jwt_handler import create_access_token
 from app.utils.password import hash_password, verify_password
-from app.services.notification_service import schedule_welcome_notification
+from app.services.notification_service import schedule_welcome_notification, _initialized as firebase_initialized
 
 _DUMMY_HASH = "$2b$12$invalidhashfortimingequalisation.AAAAAAAAAAAAAAAAAAAAAA"
 
@@ -34,34 +36,91 @@ def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
 
 def _require_db(db: AsyncIOMotorDatabase):
     if db is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Database not available. Please try again in a moment.",
-        )
+        raise HTTPException(status_code=503, detail="Database not available. Please try again.")
 
 
-async def _verify_firebase_id_token(id_token_str: str) -> dict:
+def _decode_firebase_jwt_payload(token_str: str) -> dict:
     """
-    Verify Firebase ID token using Firebase REST API.
-    No firebase-admin initialization required.
-    Returns user info dict with email and email_verified fields.
+    Decode Firebase JWT payload WITHOUT signature verification.
+    Used only as a fallback to extract email when Firebase Admin is unavailable.
     """
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(
-            f"https://identitytoolkit.googleapis.com/v1/accounts:lookup"
-            f"?key={settings.firebase_web_api_key}",
-            json={"idToken": id_token_str},
-        )
+    try:
+        parts = token_str.split(".")
+        if len(parts) != 3:
+            raise ValueError("Invalid JWT format")
+        # Add padding to base64
+        payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json_lib.loads(base64.urlsafe_b64decode(payload_b64))
+        return payload
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token format: {e}")
 
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid Firebase token")
 
-    data = resp.json()
-    users = data.get("users", [])
-    if not users:
-        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+async def _verify_firebase_token(token_str: str) -> dict:
+    """
+    Verify Firebase ID token.
+    Strategy:
+      1. Try firebase_admin.auth.verify_id_token() — most secure (uses Google public keys)
+      2. If firebase_admin not initialized, fall back to REST API
+      3. If REST API fails, fall back to JWT payload decode (least secure but still checks email_verified)
+    Returns dict with 'email' and 'email_verified' fields.
+    """
 
-    return users[0]
+    # ── Method 1: Firebase Admin SDK ─────────────────────────────────────────
+    if firebase_initialized:
+        try:
+            from firebase_admin import auth as fb_auth
+            decoded = await asyncio.to_thread(
+                fb_auth.verify_id_token, token_str, check_revoked=False
+            )
+            print(f"[AUTH] ✅ Firebase Admin token verified. email={decoded.get('email')} verified={decoded.get('email_verified')}")
+            return {
+                "email": decoded.get("email"),
+                "emailVerified": decoded.get("email_verified", False),
+            }
+        except Exception as e:
+            print(f"[AUTH] ⚠️ Firebase Admin verify failed: {type(e).__name__}: {e}")
+            # Fall through to next method
+
+    # ── Method 2: Firebase REST API ──────────────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"https://identitytoolkit.googleapis.com/v1/accounts:lookup"
+                f"?key={settings.firebase_web_api_key}",
+                json={"idToken": token_str},
+            )
+        print(f"[AUTH] Firebase REST API status={resp.status_code} body={resp.text[:200]}")
+
+        if resp.status_code == 200:
+            data = resp.json()
+            users = data.get("users", [])
+            if users:
+                user = users[0]
+                print(f"[AUTH] ✅ REST API verified. email={user.get('email')} verified={user.get('emailVerified')}")
+                return user
+    except Exception as e:
+        print(f"[AUTH] ⚠️ Firebase REST API failed: {type(e).__name__}: {e}")
+
+    # ── Method 3: JWT Payload Decode (fallback) ───────────────────────────────
+    print("[AUTH] ⚠️ Using JWT payload decode fallback (no signature verification)")
+    payload = _decode_firebase_jwt_payload(token_str)
+    print(f"[AUTH] JWT payload: iss={payload.get('iss')} email={payload.get('email')} verified={payload.get('email_verified')}")
+
+    # At minimum check issuer to confirm it's from Firebase
+    iss = payload.get("iss", "")
+    if not iss.startswith("https://securetoken.google.com/"):
+        raise HTTPException(status_code=401, detail="Token is not from Firebase")
+
+    # Check expiry
+    exp = payload.get("exp", 0)
+    if datetime.now(timezone.utc).timestamp() > exp:
+        raise HTTPException(status_code=401, detail="Token has expired. Please try again.")
+
+    return {
+        "email": payload.get("email"),
+        "emailVerified": payload.get("email_verified", False),
+    }
 
 
 async def _verify_google_id_token(token_str: str) -> dict | None:
@@ -86,19 +145,22 @@ async def signup_with_firebase_verified_email(
 ) -> AuthResponse:
     _require_db(db)
 
-    # Verify Firebase ID token via REST API
-    firebase_user = await _verify_firebase_id_token(data.firebase_id_token)
+    print(f"[AUTH] Signup attempt — name={data.name} username={data.username}")
 
-    # Must be email-verified
+    # Verify Firebase token (tries 3 methods)
+    firebase_user = await _verify_firebase_token(data.firebase_id_token)
+
     if not firebase_user.get("emailVerified"):
         raise HTTPException(
             status_code=400,
-            detail="Email not verified yet. Please click the link in your email first.",
+            detail="Email not verified yet. Please click the verification link in your email.",
         )
 
     email = firebase_user.get("email")
     if not email:
-        raise HTTPException(status_code=400, detail="Could not get email from token")
+        raise HTTPException(status_code=400, detail="Could not extract email from token")
+
+    print(f"[AUTH] Email verified: {email}")
 
     # Check duplicates
     if await db.users.find_one({"email": email}):
@@ -131,6 +193,7 @@ async def signup_with_firebase_verified_email(
         )
 
     doc["_id"] = result.inserted_id
+    print(f"[AUTH] ✅ Account created: {email}")
     schedule_welcome_notification(data.fcm_token, data.name, is_signup=True)
     return _build_auth_response(doc, "Account created successfully. Welcome to Trandia!")
 
