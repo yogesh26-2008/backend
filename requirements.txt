@@ -15,7 +15,5 @@ itsdangerous==2.2.0
 python-multipart==0.0.12
 certifi
 truststore
-# BUG FIX: slowapi was missing from requirements — it was defined in limiter.py
-# and is referenced in routes but was never actually installed, making all
-# rate-limiting code completely inert. Added here to activate it.
 slowapi==0.1.9
+aiosmtplib==3.0.1

@@ -8,8 +8,6 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
-    # BUG FIX: Was 10080 min (7 days) — no refresh token mechanism exists.
-    # Reduced to 60 min so stolen tokens expire quickly.
     jwt_expire_minutes: int = 60
 
     google_client_id: str
@@ -19,16 +17,16 @@ class Settings(BaseSettings):
 
     firebase_credentials_path: str = ""
 
-    # BUG FIX: Removed hardcoded default "trandia-secret-key".
-    # A predictable default makes OAuth state signing insecure.
-    # This MUST be set in .env / Railway env vars.
     app_secret_key: str
 
-    # BUG FIX: Added allowed_origins for open-redirect protection.
-    # Comma-separated list of trusted Flutter web origins, e.g.:
-    #   http://localhost:59236,https://trandia.app
-    # Leave empty only in local dev (all localhost origins are always allowed).
     allowed_origins: str = ""
+
+    # ── SMTP / Email ──────────────────────────────────────────────────────────
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

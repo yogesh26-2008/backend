@@ -14,8 +14,6 @@ async def connect_db():
         serverSelectionTimeoutMS=30000,
         connectTimeoutMS=30000,
         socketTimeoutMS=30000,
-        # BUG FIX: Added minPoolSize/maxPoolSize for concurrent user handling.
-        # Default pool size (100) is fine but explicit is better documented.
         minPoolSize=5,
         maxPoolSize=100,
         tlsCAFile=certifi.where(),
@@ -31,14 +29,8 @@ async def connect_db():
 
 
 async def _create_indexes():
-    """
-    BUG FIX: Was only creating email + username indexes.
-    Missing indexes caused full collection scans on every feed/notification
-    query, which would be catastrophic at scale.
-    All indexes are created with background=True so they don't block startup.
-    """
     try:
-        # ── Users ────────────────────────────────────────────────────────────
+        # ── Users ─────────────────────────────────────────────────────────────
         await _db.users.create_index(
             [("email", ASCENDING)], unique=True, background=True
         )
@@ -49,7 +41,23 @@ async def _create_indexes():
             [("google_id", ASCENDING)], sparse=True, background=True
         )
 
-        # ── Posts (feed queries) ──────────────────────────────────────────────
+        # ── Email Verifications — TTL: auto-delete after 10 min ───────────────
+        # MongoDB deletes the doc when expires_at is reached (expireAfterSeconds=0).
+        # This is a hard cleanup; the service layer also checks expiry manually.
+        await _db.email_verifications.create_index(
+            [("expires_at", ASCENDING)],
+            expireAfterSeconds=0,
+            background=True,
+            name="email_verifications_ttl",
+        )
+        await _db.email_verifications.create_index(
+            [("email", ASCENDING)],
+            unique=True,
+            background=True,
+            name="email_verifications_email",
+        )
+
+        # ── Posts ─────────────────────────────────────────────────────────────
         await _db.posts.create_index(
             [("user_id", ASCENDING), ("created_at", DESCENDING)],
             background=True,
@@ -72,20 +80,19 @@ async def _create_indexes():
             name="stories_user_feed",
         )
 
-        # ── Messages (DMs) ───────────────────────────────────────────────────
+        # ── Messages ──────────────────────────────────────────────────────────
         await _db.messages.create_index(
             [("conversation_id", ASCENDING), ("created_at", DESCENDING)],
             background=True,
             name="messages_conversation",
         )
 
-        # ── Notifications ────────────────────────────────────────────────────
+        # ── Notifications ─────────────────────────────────────────────────────
         await _db.notifications.create_index(
             [("recipient_id", ASCENDING), ("read", ASCENDING), ("created_at", DESCENDING)],
             background=True,
             name="notifications_recipient",
         )
-        # Auto-delete notifications after 30 days
         await _db.notifications.create_index(
             [("created_at", ASCENDING)],
             expireAfterSeconds=2592000,
@@ -93,7 +100,7 @@ async def _create_indexes():
             name="notifications_ttl_30d",
         )
 
-        # ── Follows ──────────────────────────────────────────────────────────
+        # ── Follows ───────────────────────────────────────────────────────────
         await _db.follows.create_index(
             [("follower_id", ASCENDING), ("following_id", ASCENDING)],
             unique=True,
@@ -104,13 +111,13 @@ async def _create_indexes():
             [("following_id", ASCENDING)], background=True, name="follows_following"
         )
 
-        # ── Refresh tokens ───────────────────────────────────────────────────
+        # ── Refresh tokens ────────────────────────────────────────────────────
         await _db.refresh_tokens.create_index(
             [("token", ASCENDING)], unique=True, background=True
         )
         await _db.refresh_tokens.create_index(
             [("expires_at", ASCENDING)],
-            expireAfterSeconds=0,  # MongoDB removes doc when expires_at is reached
+            expireAfterSeconds=0,
             background=True,
             name="refresh_tokens_ttl",
         )
