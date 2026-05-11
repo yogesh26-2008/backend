@@ -3,10 +3,10 @@ from app.config import settings
 
 
 async def send_otp_email(to_email: str, otp: str, name: str) -> None:
-    """Send a 6-digit OTP verification email via Resend API."""
+    """Send a 6-digit OTP verification email via Brevo HTTP API."""
 
-    if not settings.resend_api_key:
-        print(f"[EMAIL] ⚠️  RESEND_API_KEY not set. OTP for {to_email}: {otp}")
+    if not settings.brevo_api_key:
+        print(f"[EMAIL] ⚠️  BREVO_API_KEY not set. OTP for {to_email}: {otp}")
         return
 
     html = f"""
@@ -73,18 +73,18 @@ async def send_otp_email(to_email: str, otp: str, name: str) -> None:
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(
-            "https://api.resend.com/emails",
+            "https://api.brevo.com/v3/smtp/email",
             headers={
-                "Authorization": f"Bearer {settings.resend_api_key}",
+                "api-key": settings.brevo_api_key,
                 "Content-Type": "application/json",
             },
             json={
-                "from": "Trandia <onboarding@resend.dev>",
-                "to": [to_email],
+                "sender": {"name": "Trandia", "email": "elektroboot0@gmail.com"},
+                "to": [{"email": to_email}],
                 "subject": f"Trandia — Your verification code is {otp} 🔐",
-                "html": html,
+                "htmlContent": html,
             },
         )
 
     if response.status_code not in (200, 201):
-        raise Exception(f"Resend API error {response.status_code}: {response.text}")
+        raise Exception(f"Brevo API error {response.status_code}: {response.text}")
