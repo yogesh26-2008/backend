@@ -10,13 +10,10 @@ from app.config import settings
 from app.database import get_db
 from app.limiter import limiter
 from app.models.user import (
-    UserCreate,
     UserLogin,
     GoogleTokenRequest,
     AuthResponse,
-    SignupInitiateResponse,
-    VerifyEmailRequest,
-    ResendOtpRequest,
+    FirebaseSignupRequest,
 )
 from app.services import auth_service
 
@@ -43,36 +40,16 @@ def _is_safe_origin(origin: str) -> bool:
     return False
 
 
-# ── Email Signup — Step 1: Send OTP ──────────────────────────────────────────
+# ── Signup — Firebase Email Verification ─────────────────────────────────────
 
-@router.post("/signup/initiate", response_model=SignupInitiateResponse)
+@router.post("/signup", response_model=AuthResponse)
 @limiter.limit("5/minute")
-async def signup_initiate(request: Request, data: UserCreate, db=Depends(get_db)):
+async def signup(request: Request, data: FirebaseSignupRequest, db=Depends(get_db)):
     """
-    Step 1: Validate form data, send a 6-digit OTP to the email.
-    No account is created at this stage.
+    Complete signup after Firebase email verification.
+    Flutter verifies email via Firebase, gets ID token, sends here.
     """
-    return await auth_service.initiate_signup(data, db)
-
-
-# ── Email Signup — Step 2: Verify OTP & Create Account ───────────────────────
-
-@router.post("/signup/verify", response_model=AuthResponse)
-@limiter.limit("10/minute")
-async def signup_verify(request: Request, data: VerifyEmailRequest, db=Depends(get_db)):
-    """
-    Step 2: Verify the OTP. On success, create the account and return a token.
-    """
-    return await auth_service.verify_email_otp(data.email, data.otp, db)
-
-
-# ── Resend OTP ────────────────────────────────────────────────────────────────
-
-@router.post("/signup/resend", response_model=SignupInitiateResponse)
-@limiter.limit("3/minute")
-async def signup_resend_otp(request: Request, data: ResendOtpRequest, db=Depends(get_db)):
-    """Resend a fresh OTP to the given email (max 3 per minute)."""
-    return await auth_service.resend_otp(data.email, db)
+    return await auth_service.signup_with_firebase_verified_email(data, db)
 
 
 # ── Login ─────────────────────────────────────────────────────────────────────
@@ -88,7 +65,6 @@ async def login(request: Request, data: UserLogin, db=Depends(get_db)):
 @router.post("/google/verify", response_model=AuthResponse)
 @limiter.limit("10/minute")
 async def google_verify(request: Request, data: GoogleTokenRequest, db=Depends(get_db)):
-    """Verify a Google ID token from the Flutter mobile app."""
     return await auth_service.auth_with_google_id_token(data.id_token, data.fcm_token, db)
 
 

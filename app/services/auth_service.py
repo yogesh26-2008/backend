@@ -6,14 +6,13 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+from firebase_admin import auth as firebase_admin_auth
 from typing import Optional
 
 from app.config import settings
-from app.models.user import UserCreate, UserLogin, UserResponse, AuthResponse, SignupInitiateResponse
+from app.models.user import UserCreate, UserLogin, UserResponse, AuthResponse, FirebaseSignupRequest
 from app.utils.jwt_handler import create_access_token
 from app.utils.password import hash_password, verify_password
-from app.utils.otp import generate_otp, otp_expiry, MAX_OTP_ATTEMPTS
-from app.utils.email_service import send_otp_email
 from app.services.notification_service import schedule_welcome_notification
 
 _DUMMY_HASH = "$2b$12$invalidhashfortimingequalisation.AAAAAAAAAAAAAAAAAAAAAA"
@@ -57,126 +56,52 @@ async def _verify_google_id_token(token_str: str) -> dict | None:
     return None
 
 
-# ── Email Verification ────────────────────────────────────────────────────────
+# ── Firebase Email Verification Signup ───────────────────────────────────────
 
-async def initiate_signup(data: UserCreate, db: AsyncIOMotorDatabase) -> SignupInitiateResponse:
+async def signup_with_firebase_verified_email(
+    data: FirebaseSignupRequest, db: AsyncIOMotorDatabase
+) -> AuthResponse:
     """
-    Step 1 of email signup:
-    - Validate email/username uniqueness
-    - Generate OTP
-    - Store pending verification in DB
-    - Send OTP email
-    - Return pending response (NO account created yet)
+    Called after Firebase email verification is complete.
+    Verifies the Firebase ID token, checks email_verified=True,
+    then creates the actual Trandia account in MongoDB.
     """
     _require_db(db)
 
-    if await db.users.find_one({"email": data.email}):
+    # Verify Firebase ID token
+    try:
+        decoded = await asyncio.to_thread(
+            firebase_admin_auth.verify_id_token, data.firebase_id_token
+        )
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+
+    # Must be email-verified
+    if not decoded.get("email_verified"):
+        raise HTTPException(
+            status_code=400,
+            detail="Email not verified yet. Please click the link in your email first.",
+        )
+
+    email = decoded.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Could not get email from token")
+
+    # Check duplicates
+    if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email is already registered")
     if await db.users.find_one({"username": data.username}):
         raise HTTPException(status_code=400, detail="Username is already taken")
 
-    otp = generate_otp()
-    expires_at = otp_expiry()
-
-    # Upsert: if user tries to initiate signup again with same email,
-    # replace the old OTP with a fresh one.
-    await db.email_verifications.replace_one(
-        {"email": data.email},
-        {
-            "email": data.email,
-            "otp": otp,
-            "name": data.name,
-            "username": data.username,
-            "password_hash": await hash_password(data.password),
-            "fcm_token": data.fcm_token,
-            "attempts": 0,
-            "expires_at": expires_at,
-            "created_at": datetime.now(timezone.utc),
-        },
-        upsert=True,
-    )
-
-    # Send OTP email (non-blocking: errors are logged, not raised)
-    try:
-        await send_otp_email(data.email, otp, data.name)
-    except Exception as e:
-        print(f"[EMAIL] ❌ Failed to send OTP to {data.email}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Could not send verification email. Check SMTP config or try again.",
-        )
-
-    return SignupInitiateResponse(
-        message="OTP sent to your email. Please verify to complete signup.",
-        email=data.email,
-    )
-
-
-async def verify_email_otp(email: str, otp: str, db: AsyncIOMotorDatabase) -> AuthResponse:
-    """
-    Step 2 of email signup:
-    - Validate OTP
-    - Create actual user account
-    - Delete pending verification doc
-    - Return auth token
-    """
-    _require_db(db)
-
-    pending = await db.email_verifications.find_one({"email": email})
-
-    if not pending:
-        raise HTTPException(
-            status_code=400,
-            detail="No pending verification found. Please signup again.",
-        )
-
-    # Check expiry manually (TTL index may not fire instantly)
-    if datetime.now(timezone.utc) > pending["expires_at"].replace(tzinfo=timezone.utc):
-        await db.email_verifications.delete_one({"email": email})
-        raise HTTPException(status_code=400, detail="OTP has expired. Please signup again.")
-
-    # Check max attempts
-    if pending.get("attempts", 0) >= MAX_OTP_ATTEMPTS:
-        await db.email_verifications.delete_one({"email": email})
-        raise HTTPException(
-            status_code=429,
-            detail="Too many wrong attempts. Please signup again.",
-        )
-
-    # Verify OTP
-    if pending["otp"] != otp:
-        await db.email_verifications.update_one(
-            {"email": email},
-            {"$inc": {"attempts": 1}},
-        )
-        remaining = MAX_OTP_ATTEMPTS - pending.get("attempts", 0) - 1
-        raise HTTPException(
-            status_code=400,
-            detail=f"Wrong OTP. {remaining} attempts remaining.",
-        )
-
-    # OTP is correct — check duplicates one more time (race condition guard)
-    if await db.users.find_one({"email": email}):
-        await db.email_verifications.delete_one({"email": email})
-        raise HTTPException(status_code=400, detail="Email is already registered")
-
-    if await db.users.find_one({"username": pending["username"]}):
-        await db.email_verifications.delete_one({"email": email})
-        raise HTTPException(
-            status_code=400,
-            detail="Username was just taken. Please signup again with a different username.",
-        )
-
-    # Create the actual user
     doc = {
-        "name": pending["name"],
-        "username": pending["username"],
+        "name": data.name,
+        "username": data.username,
         "email": email,
-        "password_hash": pending["password_hash"],
+        "password_hash": await hash_password(data.password),
         "is_google_user": False,
         "google_id": None,
         "picture": None,
-        "fcm_token": pending.get("fcm_token"),
+        "fcm_token": data.fcm_token,
         "email_verified": True,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
@@ -192,41 +117,9 @@ async def verify_email_otp(email: str, otp: str, db: AsyncIOMotorDatabase) -> Au
             detail="Email is already registered" if key == "email" else "Username is already taken",
         )
 
-    # Clean up pending verification
-    await db.email_verifications.delete_one({"email": email})
-
     doc["_id"] = result.inserted_id
-    schedule_welcome_notification(pending.get("fcm_token"), pending["name"], is_signup=True)
+    schedule_welcome_notification(data.fcm_token, data.name, is_signup=True)
     return _build_auth_response(doc, "Account created successfully. Welcome to Trandia!")
-
-
-async def resend_otp(email: str, db: AsyncIOMotorDatabase) -> SignupInitiateResponse:
-    """Replace the old OTP with a fresh one and resend."""
-    _require_db(db)
-
-    pending = await db.email_verifications.find_one({"email": email})
-    if not pending:
-        raise HTTPException(
-            status_code=400,
-            detail="No pending signup found for this email. Please signup again.",
-        )
-
-    otp = generate_otp()
-    await db.email_verifications.update_one(
-        {"email": email},
-        {"$set": {"otp": otp, "attempts": 0, "expires_at": otp_expiry()}},
-    )
-
-    try:
-        await send_otp_email(email, otp, pending["name"])
-    except Exception as e:
-        print(f"[EMAIL] ❌ Failed to resend OTP to {email}: {e}")
-        raise HTTPException(status_code=500, detail="Could not resend OTP. Try again.")
-
-    return SignupInitiateResponse(
-        message="A new OTP has been sent to your email.",
-        email=email,
-    )
 
 
 # ── Email/Password Login ──────────────────────────────────────────────────────

@@ -58,26 +58,46 @@ class AuthResponse(BaseModel):
     message: str
 
 
-# ── Email Verification Models ─────────────────────────────────────────────────
+# ── Firebase Email Verification Signup ───────────────────────────────────────
+
+class FirebaseSignupRequest(BaseModel):
+    """
+    Sent after Firebase email verification is complete.
+    Flutter gets the Firebase ID token (which has email_verified=true)
+    and sends it here along with the profile data.
+    """
+    firebase_id_token: str
+    name: str
+    username: str
+    password: str
+    fcm_token: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, v):
+        if len(v) < 6:
+            raise ValueError("Password must be at least 6 characters")
+        return v
+
+    @field_validator("username")
+    @classmethod
+    def username_clean(cls, v):
+        v = v.strip().lstrip("@").lower()
+        if len(v) < 3:
+            raise ValueError("Username must be at least 3 characters")
+        return v
+
+
+# ── Legacy OTP models (kept for reference) ───────────────────────────────────
 
 class SignupInitiateResponse(BaseModel):
-    """Returned after step-1 of signup — OTP has been sent."""
     message: str
     email: str
 
 
 class VerifyEmailRequest(BaseModel):
-    """Sent by Flutter in step-2 — user enters the OTP they received."""
     email: EmailStr
     otp: str
-
-    @field_validator("otp")
-    @classmethod
-    def otp_must_be_digits(cls, v: str) -> str:
-        v = v.strip()
-        if not v.isdigit() or len(v) != 6:
-            raise ValueError("OTP must be exactly 6 digits")
-        return v
 
 
 class ResendOtpRequest(BaseModel):
