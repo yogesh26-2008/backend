@@ -53,12 +53,9 @@ def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup
 
 
 async def _send_with_delay(fcm_token: str, name: str, is_signup: bool):
-    # ── Delay reduced from 6s → 2s ────────────────────────────────────────
-    # Flutter now shows the local notification IMMEDIATELY (zero delay) from
-    # HomeScreen as soon as permission is confirmed. The backend FCM push is
-    # a BACKUP for background delivery only. 2s is enough for HomeScreen to
-    # load and mark the local notification as shown. The foreground listener
-    # ignores 'welcome' type pushes so no duplicate appears.
+    # 2s delay — Flutter local notification shows immediately on app open.
+    # This backend push is backup for when app goes to background quickly.
+    # onMessage listener ignores 'welcome' type so no duplicate appears.
     await asyncio.sleep(2)
     await _send(fcm_token, name, is_signup)
 
@@ -86,8 +83,7 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
             notification=messaging.AndroidNotification(
                 title=title,
                 body=body,
-                # Updated to match new channel ID in fcm_service.dart
-                channel_id="trandia_ch3",
+                channel_id="trandia_v4",   # must match _kChannelId in fcm_service.dart
                 color="#00C853",
                 tag="trandia_welcome",
             ),
@@ -115,13 +111,13 @@ async def _send(fcm_token: str, name: str, is_signup: bool):
     for attempt in range(_MAX_RETRIES):
         try:
             response = await asyncio.to_thread(messaging.send, msg)
-            print(f"[FCM] ✅ Sent to {first_name} — {response}")
+            print(f"[FCM] ✅ sent to {first_name}: {response}")
             return
         except Exception as e:
             last_error = e
             if attempt < _MAX_RETRIES - 1:
                 wait = _RETRY_BACKOFF[attempt]
-                print(f"[FCM] ⚠️ Attempt {attempt + 1} failed: {e} — retry in {wait}s")
+                print(f"[FCM] ⚠️ attempt {attempt + 1} failed: {e} — retry in {wait}s")
                 await asyncio.sleep(wait)
 
-    print(f"[FCM] ❌ Failed after {_MAX_RETRIES} attempts: {last_error}")
+    print(f"[FCM] ❌ failed after {_MAX_RETRIES} attempts: {last_error}")
