@@ -14,8 +14,9 @@ async def connect_db():
         serverSelectionTimeoutMS=30000,
         connectTimeoutMS=30000,
         socketTimeoutMS=30000,
-        minPoolSize=5,
-        maxPoolSize=100,
+        minPoolSize=10,
+        maxPoolSize=300,
+        maxIdleTimeMS=45000,
         tlsCAFile=certifi.where(),
     )
     _db = _client[settings.mongodb_db]
