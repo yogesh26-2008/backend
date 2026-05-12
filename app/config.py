@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -8,7 +8,8 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 60
+    jwt_expire_minutes: int = 15
+    jwt_refresh_expire_days: int = 7
 
     google_client_id: str
     google_client_secret: str
@@ -18,7 +19,10 @@ class Settings(BaseSettings):
     firebase_credentials_path: str = ""
 
     # Firebase Web API Key — used to verify ID tokens via REST API
-    firebase_web_api_key: str = "AIzaSyAhm2d0jnljLoNxqhgXdKFkbUswIfCiEB4"
+    firebase_web_api_key: str = Field(
+        default="",
+        description="Load from environment, never hardcode!"
+    )
 
     app_secret_key: str
     allowed_origins: str = ""

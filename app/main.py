@@ -1,7 +1,11 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+import logging
+import time
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -10,7 +14,26 @@ from app.config import settings
 from app.database import connect_db, close_db
 from app.limiter import limiter
 from app.services.notification_service import init_firebase
-from app.routes import auth, users
+from app.routes import auth, users, posts
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class LimitUploadSize(BaseHTTPMiddleware):
+    def __init__(self, app, max_upload_size: int):
+        super().__init__(app)
+        self.max_upload_size = max_upload_size
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method == 'POST':
+            if 'content-length' in request.headers:
+                content_length = int(request.headers['content-length'])
+                if content_length > self.max_upload_size:
+                    return JSONResponse(
+                        status_code=413,
+                        content={'detail': 'Request body too large'}
+                    )
+        return await call_next(request)
 
 TEST_PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -202,13 +225,47 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# ALLOWED_ORIGINS - Only your domains
+ALLOWED_ORIGINS = [
+    "https://yourdomain.com",
+    "https://www.yourdomain.com",
+    "http://localhost:3000",  # dev only
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    max_age=3600,
 )
+
+app.add_middleware(LimitUploadSize, max_upload_size=10 * 1024 * 1024)  # 10MB max
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration = time.time() - start
+    
+    if duration > 1.0:  # Log slow requests
+        logger.warning(
+            f"SLOW_REQUEST {request.method} {request.url.path} "
+            f"took {duration:.2f}s status={response.status_code}"
+        )
+    
+    return response
 
 
 @app.exception_handler(Exception)
@@ -223,6 +280,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(posts.router, prefix="/posts", tags=["Posts"])
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -233,3 +291,17 @@ async def root():
 @app.get("/health", tags=["Health"])
 async def health():
     return {"status": "ok", "service": "Trandia API", "version": "1.0.0"}
+
+
+@app.get("/health/ready", tags=["Health"])
+async def health_ready():
+    """Readiness check - includes dependencies."""
+    from app.database import _db
+    try:
+        if _db is not None:
+            await _db.command("ping")
+            return {"status": "ready", "database": "connected"}
+        else:
+            return JSONResponse(status_code=503, content={"status": "not_ready"})
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"status": "error", "error": str(e)})

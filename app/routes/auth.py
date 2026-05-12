@@ -43,7 +43,8 @@ def _is_safe_origin(origin: str) -> bool:
 # ── Signup — Firebase Email Verification ─────────────────────────────────────
 
 @router.post("/signup", response_model=AuthResponse)
-@limiter.limit("5/minute")
+@limiter.limit("3/minute")
+@limiter.limit("10/hour")
 async def signup(request: Request, data: FirebaseSignupRequest, db=Depends(get_db)):
     """
     Complete signup after Firebase email verification.
@@ -55,7 +56,8 @@ async def signup(request: Request, data: FirebaseSignupRequest, db=Depends(get_d
 # ── Login ─────────────────────────────────────────────────────────────────────
 
 @router.post("/login", response_model=AuthResponse)
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
+@limiter.limit("20/hour")
 async def login(request: Request, data: UserLogin, db=Depends(get_db)):
     return await auth_service.login_with_email(data, db)
 
