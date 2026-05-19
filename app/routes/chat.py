@@ -44,6 +44,39 @@ async def get_messages(conversation_id: str, skip: int = 0, limit: int = 50, use
 
     return await get_conversation_messages(conversation_id, db, skip, limit)
 
+@router.delete("/{conversation_id}/messages/{message_id}")
+async def delete_message(
+    conversation_id: str, 
+    message_id: str, 
+    user_id: str = Depends(get_current_user_id), 
+    db=Depends(get_db)
+):
+    """Delete a message from a conversation (Only sender can delete)."""
+    msg = await db.messages.find_one({"_id": ObjectId(message_id), "conversation_id": conversation_id})
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+        
+    if msg["sender_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this message")
+        
+    await db.messages.delete_one({"_id": ObjectId(message_id)})
+    return {"detail": "Message deleted successfully"}
+
+@router.delete("/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str, 
+    user_id: str = Depends(get_current_user_id), 
+    db=Depends(get_db)
+):
+    """Delete a conversation (and all its messages) for everyone."""
+    conv = await db.conversations.find_one({"_id": ObjectId(conversation_id), "participants": user_id})
+    if not conv:
+        raise HTTPException(status_code=403, detail="Not a participant in this conversation")
+        
+    await db.messages.delete_many({"conversation_id": conversation_id})
+    await db.conversations.delete_one({"_id": ObjectId(conversation_id)})
+    return {"detail": "Conversation deleted successfully"}
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     # Authenticate WebSocket connection via token query parameter
