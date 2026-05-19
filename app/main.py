@@ -225,17 +225,13 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ALLOWED_ORIGINS - Only your domains
-ALLOWED_ORIGINS = [
-    "https://yourdomain.com",
-    "https://www.yourdomain.com",
-    "http://localhost:3000",  # dev only
-]
+# ALLOWED_ORIGINS - Allow all origins for mobile app access
+ALLOWED_ORIGINS = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=False,  # Cannot use credentials with wildcard origins
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
     max_age=3600,

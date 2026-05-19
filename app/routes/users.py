@@ -3,10 +3,14 @@ from app.database import get_db
 from app.models.user import UserResponse, FCMTokenUpdate
 from app.utils.jwt_handler import get_current_user_id
 from bson import ObjectId
+from bson.errors import InvalidId
 from datetime import datetime, timezone
 
 from typing import List
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -45,23 +49,41 @@ async def search_users(
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db)
 ):
-    if not q:
+    if not q or not q.strip():
         return []
-        
-    regex = re.compile(re.escape(q), re.IGNORECASE)
+    
+    q = q.strip()
+    escaped_q = re.escape(q)
+    logger.info(f"[SEARCH] user_id={user_id} query='{q}'")
+    
+    # Build search conditions: match by username, name, email, or exact user ID
+    or_conditions = [
+        {"username": {"$regex": escaped_q, "$options": "i"}},
+        {"name": {"$regex": escaped_q, "$options": "i"}},
+        {"email": {"$regex": escaped_q, "$options": "i"}},
+    ]
+    
+    # Also try to match by ObjectId if the query looks like one
+    try:
+        search_oid = ObjectId(q)
+        or_conditions.append({"_id": search_oid})
+    except (InvalidId, Exception):
+        pass
     
     # Exclude current user from search results
-    cursor = db.users.find({
+    query_filter = {
         "$and": [
             {"_id": {"$ne": ObjectId(user_id)}},
-            {"$or": [
-                {"username": {"$regex": regex}},
-                {"name": {"$regex": regex}}
-            ]}
+            {"$or": or_conditions}
         ]
-    }).limit(20)
+    }
     
+    logger.info(f"[SEARCH] MongoDB filter: {query_filter}")
+    
+    cursor = db.users.find(query_filter).limit(20)
     users = await cursor.to_list(length=20)
+    
+    logger.info(f"[SEARCH] Found {len(users)} users")
     
     return [
         UserResponse(
