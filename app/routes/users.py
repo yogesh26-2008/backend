@@ -48,7 +48,7 @@ async def search_users(
     if not q:
         return []
         
-    regex = re.compile(f".*{q}.*", re.IGNORECASE)
+    regex = re.compile(re.escape(q), re.IGNORECASE)
     
     # Exclude current user from search results
     cursor = db.users.find({
