@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query, HTTPException
-from typing import List
+from typing import List, Optional
 import json
 import logging
+import asyncio
+from datetime import datetime, timezone
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -19,6 +21,19 @@ from app.services.chat_service import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _parse_client_created_at(value) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        normalized = value.strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 @router.get("/conversations", response_model=List[ConversationResponse])
@@ -62,8 +77,8 @@ async def get_messages(
     if not conv:
         raise HTTPException(status_code=403, detail="Not a participant in this conversation")
 
-    # Mark as read in background — don't make the client wait
-    await mark_messages_read(conversation_id, user_id, db)
+    # Mark as read in background; message fetch should stay fast.
+    asyncio.create_task(mark_messages_read(conversation_id, user_id, db))
     return await get_conversation_messages(conversation_id, db, skip, limit)
 
 
@@ -141,13 +156,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 if event_type == "message":
                     text = (data.get("text") or "").strip()
                     encrypted_aes_keys = data.get("encrypted_aes_keys")
+                    client_created_at = _parse_client_created_at(data.get("client_created_at"))
                     if not conv_id or not text:
                         continue
 
                     try:
                         db = get_db()
                         msg_res, participants = await save_message(
-                            conv_id, user_id, text, db, encrypted_aes_keys=encrypted_aes_keys
+                            conv_id,
+                            user_id,
+                            text,
+                            db,
+                            encrypted_aes_keys=encrypted_aes_keys,
+                            created_at=client_created_at,
                         )
                     except ValueError as e:
                         logger.warning(f"[WS] save_message error: {e}")
