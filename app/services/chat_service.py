@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from fastapi import WebSocket
 import json
 from datetime import datetime, timezone
@@ -161,7 +161,14 @@ async def get_conversation_messages(conversation_id: str, db, skip: int = 0, lim
     return response
 
 
-async def save_message(conversation_id: str, sender_id: str, text: str, db, encrypted_aes_keys: dict = None):
+async def save_message(
+    conversation_id: str,
+    sender_id: str,
+    text: str,
+    db,
+    encrypted_aes_keys: dict = None,
+    created_at: Optional[datetime] = None,
+):
     """Save a message and atomically increment unread counts."""
     # Verify conversation exists and user is participant
     conv = await db.conversations.find_one({
@@ -171,7 +178,7 @@ async def save_message(conversation_id: str, sender_id: str, text: str, db, encr
     if not conv:
         raise ValueError("Conversation not found or unauthorized")
 
-    now = datetime.now(timezone.utc)
+    now = created_at or datetime.now(timezone.utc)
     new_message = {
         "conversation_id": conversation_id,
         "sender_id": sender_id,
