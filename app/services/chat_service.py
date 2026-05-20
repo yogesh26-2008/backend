@@ -83,14 +83,30 @@ async def get_user_conversations(user_id: str, db) -> List[ConversationResponse]
     cursor = db.conversations.find({"participants": user_id}).sort("last_message_time", -1)
     convs = await cursor.to_list(length=100)
 
+    # Gather all unique participant IDs across conversations
+    all_pids = set()
+    for c in convs:
+        for pid in c["participants"]:
+            all_pids.add(pid)
+
+    # Query all participant users in a single bulk DB call
+    user_docs = {}
+    if all_pids:
+        object_ids = []
+        for pid in all_pids:
+            try:
+                object_ids.append(ObjectId(pid))
+            except Exception:
+                pass
+        cursor_users = db.users.find({"_id": {"$in": object_ids}})
+        async for u in cursor_users:
+            user_docs[str(u["_id"])] = u
+
     response = []
     for c in convs:
         participant_users = []
         for pid in c["participants"]:
-            try:
-                user_doc = await db.users.find_one({"_id": ObjectId(pid)})
-            except Exception:
-                user_doc = None
+            user_doc = user_docs.get(pid)
             if user_doc:
                 participant_users.append(
                     UserResponse(
@@ -100,7 +116,8 @@ async def get_user_conversations(user_id: str, db) -> List[ConversationResponse]
                         email=user_doc.get("email", ""),
                         picture=user_doc.get("picture"),
                         is_google_user=user_doc.get("is_google_user", False),
-                        created_at=user_doc["created_at"]
+                        created_at=user_doc["created_at"],
+                        public_key=user_doc.get("public_key")
                     )
                 )
 
@@ -113,6 +130,7 @@ async def get_user_conversations(user_id: str, db) -> List[ConversationResponse]
                 participants=participant_users,
                 last_message=c.get("last_message"),
                 last_message_time=c.get("last_message_time"),
+                last_message_encrypted_aes_keys=c.get("last_message_encrypted_aes_keys", {}),
                 unread_counts=c.get("unread_counts", {}),
                 is_group=c.get("is_group", False),
                 name=c.get("name")
@@ -136,13 +154,14 @@ async def get_conversation_messages(conversation_id: str, db, skip: int = 0, lim
                 sender_id=m["sender_id"],
                 text=m["text"],
                 created_at=m["created_at"],
-                read_by=m.get("read_by", [])
+                read_by=m.get("read_by", []),
+                encrypted_aes_keys=m.get("encrypted_aes_keys", {})
             )
         )
     return response
 
 
-async def save_message(conversation_id: str, sender_id: str, text: str, db):
+async def save_message(conversation_id: str, sender_id: str, text: str, db, encrypted_aes_keys: dict = None):
     """Save a message and atomically increment unread counts."""
     # Verify conversation exists and user is participant
     conv = await db.conversations.find_one({
@@ -158,7 +177,8 @@ async def save_message(conversation_id: str, sender_id: str, text: str, db):
         "sender_id": sender_id,
         "text": text,
         "created_at": now,
-        "read_by": [sender_id]
+        "read_by": [sender_id],
+        "encrypted_aes_keys": encrypted_aes_keys or {}
     }
     result = await db.messages.insert_one(new_message)
     msg_id = str(result.inserted_id)
@@ -178,6 +198,7 @@ async def save_message(conversation_id: str, sender_id: str, text: str, db):
         "$set": {
             "last_message": text,
             "last_message_time": now,
+            "last_message_encrypted_aes_keys": encrypted_aes_keys or {},
         }
     }
     if inc_fields:
@@ -194,7 +215,8 @@ async def save_message(conversation_id: str, sender_id: str, text: str, db):
         sender_id=sender_id,
         text=text,
         created_at=now,
-        read_by=[sender_id]
+        read_by=[sender_id],
+        encrypted_aes_keys=encrypted_aes_keys or {}
     ), conv["participants"]
 
 

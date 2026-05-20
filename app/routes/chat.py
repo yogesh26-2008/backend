@@ -5,7 +5,7 @@ import logging
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from app.database import get_db, _db
+from app.database import get_db
 from app.utils.jwt_handler import get_current_user_id, decode_token
 from app.models.chat import ConversationResponse, MessageResponse, ConversationCreate
 from app.services.chat_service import (
@@ -140,12 +140,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 # ── Send message ──────────────────────────────
                 if event_type == "message":
                     text = (data.get("text") or "").strip()
+                    encrypted_aes_keys = data.get("encrypted_aes_keys")
                     if not conv_id or not text:
                         continue
 
                     try:
+                        db = get_db()
                         msg_res, participants = await save_message(
-                            conv_id, user_id, text, _db
+                            conv_id, user_id, text, db, encrypted_aes_keys=encrypted_aes_keys
                         )
                     except ValueError as e:
                         logger.warning(f"[WS] save_message error: {e}")
@@ -164,7 +166,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     if not conv_id:
                         continue
                     try:
-                        conv = await _db.conversations.find_one(
+                        db = get_db()
+                        conv = await db.conversations.find_one(
                             {"_id": ObjectId(conv_id), "participants": user_id}
                         )
                     except InvalidId:
@@ -184,7 +187,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 # ── Mark as read ──────────────────────────────
                 elif event_type == "read":
                     if conv_id:
-                        await mark_messages_read(conv_id, user_id, _db)
+                        db = get_db()
+                        await mark_messages_read(conv_id, user_id, db)
 
             except json.JSONDecodeError:
                 logger.debug(f"[WS] Non-JSON message from {user_id}")

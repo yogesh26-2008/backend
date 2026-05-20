@@ -14,6 +14,7 @@ class MessageResponse(BaseModel):
     text: str
     created_at: datetime
     read_by: List[str] = []
+    encrypted_aes_keys: Dict[str, str] = {}
 
 class ConversationCreate(BaseModel):
     participant_username: str
@@ -26,6 +27,7 @@ class ConversationResponse(BaseModel):
     unread_counts: Dict[str, int] = {}
     is_group: bool = False
     name: Optional[str] = None
+    last_message_encrypted_aes_keys: Dict[str, str] = {}
 
 class ChatEvent(BaseModel):
     type: str # 'message', 'typing', 'read'

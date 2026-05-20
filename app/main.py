@@ -293,10 +293,11 @@ async def health():
 @app.get("/health/ready", tags=["Health"])
 async def health_ready():
     """Readiness check - includes dependencies."""
-    from app.database import _db
+    from app.database import get_db
     try:
-        if _db is not None:
-            await _db.command("ping")
+        db = get_db()
+        if db is not None:
+            await db.command("ping")
             return {"status": "ready", "database": "connected"}
         else:
             return JSONResponse(status_code=503, content={"status": "not_ready"})
