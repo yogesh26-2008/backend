@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from app.database import get_db
 from app.models.user import UserResponse, FCMTokenUpdate
 from app.utils.jwt_handler import get_current_user_id
@@ -28,6 +29,7 @@ async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)
         picture=user.get("picture"),
         is_google_user=user.get("is_google_user", False),
         created_at=user["created_at"],
+        public_key=user.get("public_key"),
     )
 
 
@@ -42,6 +44,23 @@ async def update_fcm_token(
         {"$set": {"fcm_token": data.fcm_token, "updated_at": datetime.now(timezone.utc)}},
     )
     return {"detail": "FCM token updated"}
+
+
+class PublicKeyUpdate(BaseModel):
+    public_key: str
+
+
+@router.put("/me/public-key")
+async def update_public_key(
+    data: PublicKeyUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"public_key": data.public_key, "updated_at": datetime.now(timezone.utc)}},
+    )
+    return {"detail": "Public key updated"}
 
 @router.get("/search", response_model=List[UserResponse])
 async def search_users(
@@ -93,6 +112,7 @@ async def search_users(
             email=u["email"],
             picture=u.get("picture"),
             is_google_user=u.get("is_google_user", False),
-            created_at=u["created_at"]
+            created_at=u["created_at"],
+            public_key=u.get("public_key")
         ) for u in users
     ]

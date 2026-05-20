@@ -49,6 +49,7 @@ class UserResponse(BaseModel):
     picture: Optional[str] = None
     is_google_user: bool
     created_at: datetime
+    public_key: Optional[str] = None
 
 
 class AuthResponse(BaseModel):

@@ -81,6 +81,18 @@ async def _create_indexes():
             name="stories_user_feed",
         )
 
+        # ── Conversations ─────────────────────────────────────────────────────
+        await _db.conversations.create_index(
+            [("participants", ASCENDING)],
+            background=True,
+            name="conversations_participants",
+        )
+        await _db.conversations.create_index(
+            [("participants", ASCENDING), ("last_message_time", DESCENDING)],
+            background=True,
+            name="conversations_participants_last_msg",
+        )
+
         # ── Messages ──────────────────────────────────────────────────────────
         await _db.messages.create_index(
             [("conversation_id", ASCENDING), ("created_at", DESCENDING)],
