@@ -15,6 +15,9 @@ class MessageResponse(BaseModel):
     created_at: datetime
     read_by: List[str] = []
     encrypted_aes_keys: Dict[str, str] = {}
+    reactions: Dict[str, List[str]] = {}   # emoji -> [user_ids]
+    reply_to_id: Optional[str] = None
+    reply_to_text: Optional[str] = None   # plain-text preview (sender's copy)
 
 class ConversationCreate(BaseModel):
     participant_username: str
@@ -30,5 +33,5 @@ class ConversationResponse(BaseModel):
     last_message_encrypted_aes_keys: Dict[str, str] = {}
 
 class ChatEvent(BaseModel):
-    type: str # 'message', 'typing', 'read'
+    type: str # 'message', 'typing', 'read', 'react'
     data: dict

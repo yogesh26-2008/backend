@@ -155,7 +155,10 @@ async def get_conversation_messages(conversation_id: str, db, skip: int = 0, lim
                 text=m["text"],
                 created_at=m["created_at"],
                 read_by=m.get("read_by", []),
-                encrypted_aes_keys=m.get("encrypted_aes_keys", {})
+                encrypted_aes_keys=m.get("encrypted_aes_keys", {}),
+                reactions=m.get("reactions", {}),
+                reply_to_id=m.get("reply_to_id"),
+                reply_to_text=m.get("reply_to_text"),
             )
         )
     return response
@@ -168,6 +171,8 @@ async def save_message(
     db,
     encrypted_aes_keys: dict = None,
     created_at: Optional[datetime] = None,
+    reply_to_id: Optional[str] = None,
+    reply_to_text: Optional[str] = None,
 ):
     """Save a message and atomically increment unread counts."""
     # Verify conversation exists and user is participant
@@ -185,16 +190,14 @@ async def save_message(
         "text": text,
         "created_at": now,
         "read_by": [sender_id],
-        "encrypted_aes_keys": encrypted_aes_keys or {}
+        "encrypted_aes_keys": encrypted_aes_keys or {},
+        "reactions": {},
+        "reply_to_id": reply_to_id,
+        "reply_to_text": reply_to_text,
     }
     result = await db.messages.insert_one(new_message)
     msg_id = str(result.inserted_id)
 
-    # BUG FIX: Previously used $set with read-then-write for unread_counts.
-    # This caused a race condition: two concurrent messages would both read
-    # the same count (e.g. 0) and set it to 1 instead of 2.
-    # Fix: use MongoDB $inc which is atomic — it increments regardless of
-    # the current value and initializes the field to 1 if it doesn't exist.
     inc_fields = {
         f"unread_counts.{pid}": 1
         for pid in conv["participants"]
@@ -223,8 +226,53 @@ async def save_message(
         text=text,
         created_at=now,
         read_by=[sender_id],
-        encrypted_aes_keys=encrypted_aes_keys or {}
+        encrypted_aes_keys=encrypted_aes_keys or {},
+        reactions={},
+        reply_to_id=reply_to_id,
+        reply_to_text=reply_to_text,
     ), conv["participants"]
+
+
+async def toggle_reaction(message_id: str, user_id: str, emoji: str, db):
+    """Toggle a reaction on a message. Returns updated reactions dict."""
+    try:
+        msg_oid = ObjectId(message_id)
+    except Exception:
+        raise ValueError("Invalid message id")
+
+    msg = await db.messages.find_one({"_id": msg_oid})
+    if not msg:
+        raise ValueError("Message not found")
+
+    reactions: dict = msg.get("reactions", {})
+    users_for_emoji: list = reactions.get(emoji, [])
+
+    if user_id in users_for_emoji:
+        # Remove reaction
+        await db.messages.update_one(
+            {"_id": msg_oid},
+            {"$pull": {f"reactions.{emoji}": user_id}}
+        )
+        users_for_emoji.remove(user_id)
+    else:
+        # Add reaction
+        await db.messages.update_one(
+            {"_id": msg_oid},
+            {"$addToSet": {f"reactions.{emoji}": user_id}}
+        )
+        users_for_emoji.append(user_id)
+
+    # Cleanup empty emoji lists
+    if not users_for_emoji and emoji in reactions:
+        await db.messages.update_one(
+            {"_id": msg_oid},
+            {"$unset": {f"reactions.{emoji}": ""}}
+        )
+        reactions.pop(emoji, None)
+    else:
+        reactions[emoji] = users_for_emoji
+
+    return reactions, msg["conversation_id"]
 
 
 async def mark_messages_read(conversation_id: str, user_id: str, db):

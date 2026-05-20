@@ -17,6 +17,7 @@ from app.services.chat_service import (
     get_conversation_messages,
     save_message,
     mark_messages_read,
+    toggle_reaction,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,39 @@ async def get_messages(
     return await get_conversation_messages(conversation_id, db, skip, limit)
 
 
+@router.post("/{conversation_id}/messages/{message_id}/react")
+async def react_to_message(
+    conversation_id: str,
+    message_id: str,
+    body: dict,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Toggle a reaction emoji on a message (REST fallback)."""
+    emoji = body.get("emoji", "").strip()
+    if not emoji:
+        raise HTTPException(status_code=400, detail="emoji is required")
+
+    try:
+        reactions, conv_id = await toggle_reaction(message_id, user_id, emoji, db)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # Broadcast via WebSocket to all participants
+    conv = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
+    if conv:
+        broadcast = json.dumps({
+            "type": "react",
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "reactions": reactions,
+        })
+        for pid in conv["participants"]:
+            await manager.send_personal_message(broadcast, pid)
+
+    return {"reactions": reactions}
+
+
 @router.delete("/{conversation_id}/messages/{message_id}")
 async def delete_message(
     conversation_id: str,
@@ -132,7 +166,11 @@ async def delete_conversation(
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     """
     Real-time chat WebSocket.
-    Client sends JSON: {"type": "message"|"typing"|"read", "conversation_id": "...", "text": "..."}
+    Client sends JSON:
+      {"type": "message",  "conversation_id": "...", "text": "...", "reply_to_id": "...", "reply_to_text": "..."}
+      {"type": "typing",   "conversation_id": "..."}
+      {"type": "read",     "conversation_id": "..."}
+      {"type": "react",    "conversation_id": "...", "message_id": "...", "emoji": "❤️"}
     """
     # Authenticate
     payload = decode_token(token)
@@ -157,6 +195,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     text = (data.get("text") or "").strip()
                     encrypted_aes_keys = data.get("encrypted_aes_keys")
                     client_created_at = _parse_client_created_at(data.get("client_created_at"))
+                    reply_to_id   = data.get("reply_to_id")
+                    reply_to_text = data.get("reply_to_text")
                     if not conv_id or not text:
                         continue
 
@@ -169,6 +209,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                             db,
                             encrypted_aes_keys=encrypted_aes_keys,
                             created_at=client_created_at,
+                            reply_to_id=reply_to_id,
+                            reply_to_text=reply_to_text,
                         )
                     except ValueError as e:
                         logger.warning(f"[WS] save_message error: {e}")
@@ -210,6 +252,39 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     if conv_id:
                         db = get_db()
                         await mark_messages_read(conv_id, user_id, db)
+
+                # ── React to message ──────────────────────────
+                elif event_type == "react":
+                    emoji      = (data.get("emoji") or "").strip()
+                    message_id = (data.get("message_id") or "").strip()
+                    if not conv_id or not emoji or not message_id:
+                        continue
+
+                    try:
+                        db = get_db()
+                        reactions, _ = await toggle_reaction(message_id, user_id, emoji, db)
+                    except ValueError as e:
+                        logger.warning(f"[WS] toggle_reaction error: {e}")
+                        continue
+
+                    # Fetch participants for broadcast
+                    try:
+                        conv = await db.conversations.find_one(
+                            {"_id": ObjectId(conv_id), "participants": user_id}
+                        )
+                    except InvalidId:
+                        continue
+                    if not conv:
+                        continue
+
+                    broadcast = json.dumps({
+                        "type": "react",
+                        "message_id": message_id,
+                        "conversation_id": conv_id,
+                        "reactions": reactions,
+                    })
+                    for pid in conv["participants"]:
+                        await manager.send_personal_message(broadcast, pid)
 
             except json.JSONDecodeError:
                 logger.debug(f"[WS] Non-JSON message from {user_id}")
