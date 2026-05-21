@@ -23,7 +23,7 @@ _initialized = False
 _pending_tasks: set[asyncio.Task] = set()
 
 _MAX_RETRIES   = 3
-_RETRY_BACKOFF = [1, 2]
+_RETRY_BACKOFF = [0.5, 1, 2]  # 3 delays for 3 retry attempts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,7 +234,7 @@ async def _send_message_notification(
     conversation_id: str,
 ):
     title = sender_username
-    body  = "sent you a message"
+    body  = "sent you a message 💬"
 
     msg = messaging.Message(
         # notification block → shows heads-up banner on Android & iOS lock screen
@@ -242,11 +242,12 @@ async def _send_message_notification(
 
         android=messaging.AndroidConfig(
             priority="high",
-            ttl=86400,   # 24 h — discard stale messages
+            ttl=3600,   # 1 h — discard stale messages
             notification=messaging.AndroidNotification(
                 title=title,
                 body=body,
                 channel_id="trandia_v4",   # Importance.max channel
+                icon="@mipmap/launcher_icon",
                 color="#FFFFFF",
                 tag=f"msg_{conversation_id}",   # collapse multiple msgs from same conv
                 notification_count=1,
