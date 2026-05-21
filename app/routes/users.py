@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from app.database import get_db
 from app.models.user import UserResponse, FCMTokenUpdate
+from app.services.notification_service import schedule_follow_notification
 from app.utils.jwt_handler import get_current_user_id
 from bson import ObjectId
 from bson.errors import InvalidId
 from datetime import datetime, timezone
+import asyncio
 
 from typing import List
 import re
@@ -144,6 +146,18 @@ async def follow_user(
     # Atomic counter updates
     await db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": 1}})
     await db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": 1}})
+
+    # Fire-and-forget notification — fetch target's FCM token + my info in parallel
+    me, target = await asyncio.gather(
+        db.users.find_one({"_id": me_oid},     {"name": 1, "username": 1}),
+        db.users.find_one({"_id": target_oid}, {"fcm_token": 1}),
+    )
+    if me and target:
+        schedule_follow_notification(
+            fcm_token=target.get("fcm_token"),
+            follower_username=me.get("username", ""),
+            follower_name=me.get("name", ""),
+        )
 
     logger.info(f"[FOLLOW] {current_user_id} → {target_id}")
     return {"detail": "followed", "following": True}

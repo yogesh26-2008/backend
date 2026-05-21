@@ -80,6 +80,64 @@ def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup
     task.add_done_callback(_pending_tasks.discard)
 
 
+def schedule_follow_notification(fcm_token: Optional[str], follower_username: str, follower_name: str):
+    """
+    Fire-and-forget follow notification.
+    Called from follow endpoint — does NOT block the API response.
+    """
+    if not _initialized:
+        return
+    if not fcm_token:
+        return
+    task = asyncio.create_task(
+        _send_follow_notification(fcm_token, follower_username, follower_name)
+    )
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
+
+
+async def _send_follow_notification(fcm_token: str, follower_username: str, follower_name: str):
+    title = follower_name or follower_username
+    body  = "started following you"
+
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        android=messaging.AndroidConfig(
+            priority="high",
+            ttl=3600,
+            notification=messaging.AndroidNotification(
+                title=title,
+                body=body,
+                channel_id="trandia_v4",
+                color="#00C853",
+                tag=f"follow_{follower_username}",  # collapse rapid follows
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10", "apns-push-type": "alert"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title=title,
+                        subtitle="New follower",
+                        body=body,
+                    ),
+                    badge=1,
+                    sound="default",
+                )
+            ),
+        ),
+        data={
+            "type":     "follow",
+            "username": follower_username,
+            "title":    title,
+            "body":     body,
+        },
+        token=fcm_token,
+    )
+    await _dispatch(msg, label=f"follow→{follower_username}")
+
+
 def schedule_message_notification(
     fcm_token: Optional[str],
     sender_username: str,
