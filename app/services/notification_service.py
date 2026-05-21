@@ -115,7 +115,7 @@ async def _store_follow_notification(db, recipient_id: str, from_user_id: str, f
     """Persist a follow notification document in MongoDB."""
     from datetime import datetime, timezone
     try:
-        await db.notifications.insert_one({
+        res = await db.notifications.insert_one({
             "recipient_id": recipient_id,
             "type": "follow",
             "from_user_id": from_user_id,
@@ -125,7 +125,32 @@ async def _store_follow_notification(db, recipient_id: str, from_user_id: str, f
             "read": False,
             "created_at": datetime.now(timezone.utc),
         })
+        notif_id = str(res.inserted_id)
         print(f"[NOTIF] ✅ stored follow notification {from_username}→{recipient_id}")
+
+        # Real-time WebSocket delivery if the user is currently online/connected
+        try:
+            from app.services.chat_service import manager
+            if recipient_id in manager.active_connections:
+                import json
+                payload = json.dumps({
+                    "type": "notification",
+                    "notification": {
+                        "id": notif_id,
+                        "recipient_id": recipient_id,
+                        "type": "follow",
+                        "from_user_id": from_user_id,
+                        "from_username": from_username,
+                        "from_name": from_name,
+                        "text": "started following you",
+                        "read": False,
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }
+                })
+                await manager.send_personal_message(payload, recipient_id)
+                print(f"[NOTIF] ✅ sent real-time follow notification to user {recipient_id}")
+        except Exception as ws_err:
+            print(f"[NOTIF] ⚠️ WebSocket delivery failed: {ws_err}")
     except Exception as e:
         print(f"[NOTIF] ❌ store failed: {e}")
 
