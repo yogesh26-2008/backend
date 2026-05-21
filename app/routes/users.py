@@ -62,7 +62,7 @@ async def update_public_key(
     )
     return {"detail": "Public key updated"}
 
-@router.get("/search", response_model=List[UserResponse])
+@router.get("/search")
 async def search_users(
     q: str = "",
     user_id: str = Depends(get_current_user_id),
@@ -70,50 +70,45 @@ async def search_users(
 ):
     if not q or not q.strip():
         return []
-    
+
     q = q.strip()
     escaped_q = re.escape(q)
     logger.info(f"[SEARCH] user_id={user_id} query='{q}'")
-    
-    # Build search conditions: match by username or name ONLY (no email)
-    or_conditions = [
-        {"username": {"$regex": escaped_q, "$options": "i"}},
-        {"name": {"$regex": escaped_q, "$options": "i"}},
-    ]
-    
-    # Also try to match by ObjectId if the query looks like one
-    try:
-        search_oid = ObjectId(q)
-        or_conditions.append({"_id": search_oid})
-    except (InvalidId, Exception):
-        pass
-    
-    # Exclude current user from search results
+
+    # Match by USERNAME ONLY — no name, no email (prevents gmail-like results)
     query_filter = {
         "$and": [
             {"_id": {"$ne": ObjectId(user_id)}},
-            {"$or": or_conditions}
+            {"username": {"$regex": escaped_q, "$options": "i"}},
         ]
     }
-    
-    logger.info(f"[SEARCH] MongoDB filter: {query_filter}")
-    
+
     cursor = db.users.find(query_filter).limit(20)
     users = await cursor.to_list(length=20)
-    
     logger.info(f"[SEARCH] Found {len(users)} users")
-    
+
+    if not users:
+        return []
+
+    # Batch-fetch follow statuses in ONE query instead of N queries
+    target_ids = [str(u["_id"]) for u in users]
+    following_cursor = db.follows.find(
+        {"follower_id": user_id, "following_id": {"$in": target_ids}},
+        {"following_id": 1, "_id": 0}
+    )
+    following_docs = await following_cursor.to_list(length=20)
+    following_set = {doc["following_id"] for doc in following_docs}
+
     return [
-        UserResponse(
-            id=str(u["_id"]),
-            name=u["name"],
-            username=u["username"],
-            email=u["email"],
-            picture=u.get("picture"),
-            is_google_user=u.get("is_google_user", False),
-            created_at=u["created_at"],
-            public_key=u.get("public_key")
-        ) for u in users
+        {
+            "id": str(u["_id"]),
+            "name": u["name"],
+            "username": u["username"],
+            "picture": u.get("picture"),
+            "public_key": u.get("public_key"),
+            "is_following": str(u["_id"]) in following_set,
+        }
+        for u in users
     ]
 
 
