@@ -19,6 +19,7 @@ from app.services.chat_service import (
     mark_messages_read,
     toggle_reaction,
 )
+from app.services.notification_service import schedule_message_notification
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -78,7 +79,6 @@ async def get_messages(
     if not conv:
         raise HTTPException(status_code=403, detail="Not a participant in this conversation")
 
-    # Mark as read in background; message fetch should stay fast.
     asyncio.create_task(mark_messages_read(conversation_id, user_id, db))
     return await get_conversation_messages(conversation_id, db, skip, limit)
 
@@ -101,7 +101,6 @@ async def react_to_message(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    # Broadcast via WebSocket to all participants
     conv = await db.conversations.find_one({"_id": ObjectId(conversation_id)})
     if conv:
         broadcast = json.dumps({
@@ -162,17 +161,64 @@ async def delete_conversation(
     return {"detail": "Conversation deleted"}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FCM push helper — sends to offline recipients only
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _push_to_offline_recipients(
+    sender_id: str,
+    sender_username: str,
+    conversation_id: str,
+    participant_ids: List[str],
+    db,
+):
+    """
+    For every participant who is NOT connected via WebSocket (i.e. app is
+    backgrounded or killed), fetch their FCM token and fire a push
+    notification.  The sender is always skipped.
+    """
+    offline_ids = [
+        pid for pid in participant_ids
+        if pid != sender_id and pid not in manager.active_connections
+    ]
+    if not offline_ids:
+        return
+
+    object_ids = []
+    for pid in offline_ids:
+        try:
+            object_ids.append(ObjectId(pid))
+        except Exception:
+            pass
+
+    if not object_ids:
+        return
+
+    cursor = db.users.find(
+        {"_id": {"$in": object_ids}, "fcm_token": {"$exists": True, "$ne": None}},
+        {"fcm_token": 1},
+    )
+    async for user_doc in cursor:
+        fcm_token = user_doc.get("fcm_token")
+        if fcm_token:
+            schedule_message_notification(
+                fcm_token=fcm_token,
+                sender_username=sender_username,
+                conversation_id=conversation_id,
+            )
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     """
     Real-time chat WebSocket.
     Client sends JSON:
-      {"type": "message",  "conversation_id": "...", "text": "...", "reply_to_id": "...", "reply_to_text": "..."}
+      {"type": "message",  "conversation_id": "...", "text": "...",
+       "reply_to_id": "...", "reply_to_text": "..."}
       {"type": "typing",   "conversation_id": "..."}
       {"type": "read",     "conversation_id": "..."}
       {"type": "react",    "conversation_id": "...", "message_id": "...", "emoji": "❤️"}
     """
-    # Authenticate
     payload = decode_token(token)
     if not payload:
         await websocket.close(code=1008, reason="Invalid or expired token")
@@ -181,6 +227,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     user_id: str = payload["sub"]
     await manager.connect(websocket, user_id)
     logger.info(f"[WS] User {user_id} connected")
+
+    # Fetch sender profile once per connection (username for notifications)
+    db = get_db()
+    sender_doc = await db.users.find_one({"_id": ObjectId(user_id)}, {"username": 1})
+    sender_username: str = (sender_doc or {}).get("username", "Someone")
 
     try:
         while True:
@@ -192,16 +243,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
                 # ── Send message ──────────────────────────────
                 if event_type == "message":
-                    text = (data.get("text") or "").strip()
+                    text               = (data.get("text") or "").strip()
                     encrypted_aes_keys = data.get("encrypted_aes_keys")
-                    client_created_at = _parse_client_created_at(data.get("client_created_at"))
-                    reply_to_id   = data.get("reply_to_id")
-                    reply_to_text = data.get("reply_to_text")
+                    client_created_at  = _parse_client_created_at(data.get("client_created_at"))
+                    reply_to_id        = data.get("reply_to_id")
+                    reply_to_text      = data.get("reply_to_text")
+
                     if not conv_id or not text:
                         continue
 
                     try:
-                        db = get_db()
                         msg_res, participants = await save_message(
                             conv_id,
                             user_id,
@@ -216,20 +267,30 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         logger.warning(f"[WS] save_message error: {e}")
                         continue
 
-                    # Broadcast to all participants (including sender — confirms delivery)
+                    # 1️⃣  Deliver over WebSocket to all online participants
                     broadcast = json.dumps({
-                        "type": "message",
+                        "type":    "message",
                         "message": msg_res.model_dump(mode="json"),
                     })
                     for pid in participants:
                         await manager.send_personal_message(broadcast, pid)
+
+                    # 2️⃣  Push FCM to offline participants (fire & forget)
+                    asyncio.create_task(
+                        _push_to_offline_recipients(
+                            sender_id=user_id,
+                            sender_username=sender_username,
+                            conversation_id=conv_id,
+                            participant_ids=participants,
+                            db=db,
+                        )
+                    )
 
                 # ── Typing indicator ──────────────────────────
                 elif event_type == "typing":
                     if not conv_id:
                         continue
                     try:
-                        db = get_db()
                         conv = await db.conversations.find_one(
                             {"_id": ObjectId(conv_id), "participants": user_id}
                         )
@@ -239,9 +300,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         continue
 
                     typing_msg = json.dumps({
-                        "type": "typing",
+                        "type":            "typing",
                         "conversation_id": conv_id,
-                        "user_id": user_id,
+                        "user_id":         user_id,
                     })
                     for pid in conv["participants"]:
                         if pid != user_id:
@@ -250,7 +311,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 # ── Mark as read ──────────────────────────────
                 elif event_type == "read":
                     if conv_id:
-                        db = get_db()
                         await mark_messages_read(conv_id, user_id, db)
 
                 # ── React to message ──────────────────────────
@@ -261,13 +321,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         continue
 
                     try:
-                        db = get_db()
                         reactions, _ = await toggle_reaction(message_id, user_id, emoji, db)
                     except ValueError as e:
                         logger.warning(f"[WS] toggle_reaction error: {e}")
                         continue
 
-                    # Fetch participants for broadcast
                     try:
                         conv = await db.conversations.find_one(
                             {"_id": ObjectId(conv_id), "participants": user_id}
@@ -278,10 +336,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         continue
 
                     broadcast = json.dumps({
-                        "type": "react",
-                        "message_id": message_id,
+                        "type":            "react",
+                        "message_id":      message_id,
                         "conversation_id": conv_id,
-                        "reactions": reactions,
+                        "reactions":       reactions,
                     })
                     for pid in conv["participants"]:
                         await manager.send_personal_message(broadcast, pid)
