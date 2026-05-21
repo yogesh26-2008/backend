@@ -5,6 +5,7 @@ Centralised FCM push notification dispatcher.
 
 Supported notification types
   • welcome  — sent on login / signup
+  • follow   — sent when someone follows the user
   • message  — sent when a chat message arrives for an offline recipient
 
 All sends are fire-and-forget background tasks with exponential retry.
@@ -18,6 +19,7 @@ from typing import Optional
 
 import firebase_admin
 from firebase_admin import credentials, messaging
+from bson import ObjectId
 
 _initialized = False
 _pending_tasks: set[asyncio.Task] = set()
@@ -91,12 +93,20 @@ def schedule_follow_notification(
     """
     Fire-and-forget follow notification.
     Called from follow endpoint — does NOT block the API response.
-    Persists a notification document in MongoDB AND sends an FCM push.
+
+    Pre-generates a MongoDB ObjectId so both the DB record and the FCM push
+    carry the same `id`. This lets Flutter deduplicate when a user is online
+    and receives BOTH a WebSocket notification AND an FCM foreground push.
     """
+    # Pre-generate notification ID — shared between DB insert and FCM payload
+    notif_id = str(ObjectId())
+
     # Always persist — even if FCM is not initialised
     if db and recipient_id:
         task_db = asyncio.create_task(
-            _store_follow_notification(db, recipient_id, follower_id, follower_username, follower_name)
+            _store_follow_notification(
+                db, notif_id, recipient_id, follower_id, follower_username, follower_name
+            )
         )
         _pending_tasks.add(task_db)
         task_db.add_done_callback(_pending_tasks.discard)
@@ -105,17 +115,25 @@ def schedule_follow_notification(
         return
 
     task = asyncio.create_task(
-        _send_follow_notification(fcm_token, follower_username, follower_name)
+        _send_follow_notification(fcm_token, follower_username, follower_name, notif_id)
     )
     _pending_tasks.add(task)
     task.add_done_callback(_pending_tasks.discard)
 
 
-async def _store_follow_notification(db, recipient_id: str, from_user_id: str, from_username: str, from_name: str):
-    """Persist a follow notification document in MongoDB."""
+async def _store_follow_notification(
+    db,
+    notif_id: str,
+    recipient_id: str,
+    from_user_id: str,
+    from_username: str,
+    from_name: str,
+):
+    """Persist a follow notification document in MongoDB and deliver via WebSocket."""
     from datetime import datetime, timezone
     try:
-        res = await db.notifications.insert_one({
+        await db.notifications.insert_one({
+            "_id": ObjectId(notif_id),
             "recipient_id": recipient_id,
             "type": "follow",
             "from_user_id": from_user_id,
@@ -125,14 +143,12 @@ async def _store_follow_notification(db, recipient_id: str, from_user_id: str, f
             "read": False,
             "created_at": datetime.now(timezone.utc),
         })
-        notif_id = str(res.inserted_id)
-        print(f"[NOTIF] ✅ stored follow notification {from_username}→{recipient_id}")
+        print(f"[NOTIF] ✅ stored follow notification {from_username}→{recipient_id} id={notif_id}")
 
         # Real-time WebSocket delivery if the user is currently online/connected
         try:
             from app.services.chat_service import manager
             if recipient_id in manager.active_connections:
-                import json
                 payload = json.dumps({
                     "type": "notification",
                     "notification": {
@@ -144,18 +160,24 @@ async def _store_follow_notification(db, recipient_id: str, from_user_id: str, f
                         "from_name": from_name,
                         "text": "started following you",
                         "read": False,
-                        "created_at": datetime.now(timezone.utc).isoformat()
+                        "created_at": datetime.now(timezone.utc).isoformat(),
                     }
                 })
                 await manager.send_personal_message(payload, recipient_id)
-                print(f"[NOTIF] ✅ sent real-time follow notification to user {recipient_id}")
+                print(f"[NOTIF] ✅ sent real-time WS notification to user {recipient_id}")
         except Exception as ws_err:
             print(f"[NOTIF] ⚠️ WebSocket delivery failed: {ws_err}")
     except Exception as e:
         print(f"[NOTIF] ❌ store failed: {e}")
 
 
-async def _send_follow_notification(fcm_token: str, follower_username: str, follower_name: str):
+async def _send_follow_notification(
+    fcm_token: str,
+    follower_username: str,
+    follower_name: str,
+    notif_id: str = "",
+):
+    """Send an FCM push for a new follower."""
     title = follower_name or follower_username
     body  = "started following you"
 
@@ -188,6 +210,7 @@ async def _send_follow_notification(fcm_token: str, follower_username: str, foll
         ),
         data={
             "type":     "follow",
+            "id":       notif_id,       # ← shared with DB record for Flutter dedup
             "username": follower_username,
             "title":    title,
             "body":     body,
@@ -296,28 +319,25 @@ async def _send_message_notification(
     body  = "sent you a message 💬"
 
     msg = messaging.Message(
-        # notification block → shows heads-up banner on Android & iOS lock screen
         notification=messaging.Notification(title=title, body=body),
-
         android=messaging.AndroidConfig(
             priority="high",
-            ttl=3600,   # 1 h — discard stale messages
+            ttl=3600,
             notification=messaging.AndroidNotification(
                 title=title,
                 body=body,
-                channel_id="trandia_v4",   # Importance.max channel
+                channel_id="trandia_v4",
                 icon="@mipmap/launcher_icon",
                 color="#FFFFFF",
-                tag=f"msg_{conversation_id}",   # collapse multiple msgs from same conv
+                tag=f"msg_{conversation_id}",
                 notification_count=1,
             ),
         ),
-
         apns=messaging.APNSConfig(
             headers={
                 "apns-priority":  "10",
                 "apns-push-type": "alert",
-                "apns-collapse-id": conversation_id,  # collapse per conversation
+                "apns-collapse-id": conversation_id,
             },
             payload=messaging.APNSPayload(
                 aps=messaging.Aps(
@@ -332,8 +352,6 @@ async def _send_message_notification(
                 )
             ),
         ),
-
-        # Data payload — Flutter reads this to navigate to the right screen
         data={
             "type":            "message",
             "conversation_id": conversation_id,
@@ -341,7 +359,6 @@ async def _send_message_notification(
             "title":           title,
             "body":            body,
         },
-
         token=fcm_token,
     )
 
