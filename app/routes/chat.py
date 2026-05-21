@@ -165,7 +165,7 @@ async def delete_conversation(
 # FCM push helper — sends to offline recipients only
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _push_to_offline_recipients(
+async def _push_to_eligible_recipients(
     sender_id: str,
     sender_username: str,
     conversation_id: str,
@@ -173,19 +173,21 @@ async def _push_to_offline_recipients(
     db,
 ):
     """
-    For every participant who is NOT connected via WebSocket (i.e. app is
-    backgrounded or killed), fetch their FCM token and fire a push
-    notification.  The sender is always skipped.
+    For every participant who is NOT the sender, fetch their FCM token
+    and fire a push notification.
+
+    We push to ALL participants (online and offline) because:
+    - If the user has the app open but is on a different screen, they
+      SHOULD get a heads-up banner.
+    - The Flutter FCM foreground listener suppresses the notification
+      automatically when the user is actively viewing that conversation.
     """
-    offline_ids = [
-        pid for pid in participant_ids
-        if pid != sender_id and pid not in manager.active_connections
-    ]
-    if not offline_ids:
+    eligible_ids = [pid for pid in participant_ids if pid != sender_id]
+    if not eligible_ids:
         return
 
     object_ids = []
-    for pid in offline_ids:
+    for pid in eligible_ids:
         try:
             object_ids.append(ObjectId(pid))
         except Exception:
@@ -275,9 +277,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     for pid in participants:
                         await manager.send_personal_message(broadcast, pid)
 
-                    # 2️⃣  Push FCM to offline participants (fire & forget)
+                    # 2️⃣  Push FCM to eligible participants (fire & forget)
                     asyncio.create_task(
-                        _push_to_offline_recipients(
+                        _push_to_eligible_recipients(
                             sender_id=user_id,
                             sender_username=sender_username,
                             conversation_id=conv_id,
