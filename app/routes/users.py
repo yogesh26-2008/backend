@@ -75,11 +75,10 @@ async def search_users(
     escaped_q = re.escape(q)
     logger.info(f"[SEARCH] user_id={user_id} query='{q}'")
     
-    # Build search conditions: match by username, name, email, or exact user ID
+    # Build search conditions: match by username or name ONLY (no email)
     or_conditions = [
         {"username": {"$regex": escaped_q, "$options": "i"}},
         {"name": {"$regex": escaped_q, "$options": "i"}},
-        {"email": {"$regex": escaped_q, "$options": "i"}},
     ]
     
     # Also try to match by ObjectId if the query looks like one
@@ -116,3 +115,79 @@ async def search_users(
             public_key=u.get("public_key")
         ) for u in users
     ]
+
+
+# ─── Follow / Unfollow / Follow-status ───────────────────────────────────────
+
+@router.post("/{target_id}/follow")
+async def follow_user(
+    target_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Follow a user. Idempotent — calling twice has no extra effect."""
+    if target_id == current_user_id:
+        raise HTTPException(status_code=400, detail="Cannot follow yourself")
+
+    try:
+        target_oid = ObjectId(target_id)
+        me_oid     = ObjectId(current_user_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+
+    # Upsert the follows record (no duplicate)
+    await db.follows.update_one(
+        {"follower_id": current_user_id, "following_id": target_id},
+        {"$setOnInsert": {
+            "follower_id": current_user_id,
+            "following_id": target_id,
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+
+    # Atomic counter updates
+    await db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": 1}})
+    await db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": 1}})
+
+    logger.info(f"[FOLLOW] {current_user_id} → {target_id}")
+    return {"detail": "followed", "following": True}
+
+
+@router.delete("/{target_id}/follow")
+async def unfollow_user(
+    target_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Unfollow a user. Idempotent."""
+    try:
+        target_oid = ObjectId(target_id)
+        me_oid     = ObjectId(current_user_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+
+    result = await db.follows.delete_one(
+        {"follower_id": current_user_id, "following_id": target_id}
+    )
+
+    if result.deleted_count > 0:
+        # Only decrement if a record was actually removed
+        await db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": -1}})
+        await db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": -1}})
+
+    logger.info(f"[UNFOLLOW] {current_user_id} → {target_id}")
+    return {"detail": "unfollowed", "following": False}
+
+
+@router.get("/{target_id}/follow")
+async def get_follow_status(
+    target_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Check whether the current user is following target_id."""
+    exists = await db.follows.find_one(
+        {"follower_id": current_user_id, "following_id": target_id}
+    )
+    return {"following": exists is not None}
