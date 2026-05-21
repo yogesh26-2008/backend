@@ -26,16 +26,14 @@ router = APIRouter()
 
 
 def _parse_client_created_at(value) -> Optional[datetime]:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        normalized = value.strip().replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(normalized)
-        if parsed.tzinfo is None:
-            parsed = parsed.astimezone()
-        return parsed.astimezone(timezone.utc)
-    except ValueError:
-        return None
+    """
+    NOTE: Hum client time ko IGNORE karte hain aur server UTC time use karte hain.
+    Iska karan: client ka clock galat ho sakta hai ya timezone mismatch ho sakti hai
+    jisse dono users ko alag-alag time dikh sakta tha.
+    Server hamesha accurate UTC time use karta hai.
+    """
+    return None  # Always use server time (datetime.now(timezone.utc) in save_message)
+
 
 
 @router.get("/conversations", response_model=List[ConversationResponse])
