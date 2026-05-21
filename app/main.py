@@ -14,7 +14,7 @@ from app.config import settings
 from app.database import connect_db, close_db
 from app.limiter import limiter
 from app.services.notification_service import init_firebase
-from app.routes import auth, users, posts, chat
+from app.routes import auth, users, posts, chat, notifications
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -278,6 +278,7 @@ app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(posts.router, prefix="/posts", tags=["Posts"])
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
+app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)

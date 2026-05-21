@@ -157,6 +157,9 @@ async def follow_user(
             fcm_token=target.get("fcm_token"),
             follower_username=me.get("username", ""),
             follower_name=me.get("name", ""),
+            follower_id=current_user_id,
+            recipient_id=target_id,
+            db=db,
         )
 
     logger.info(f"[FOLLOW] {current_user_id} → {target_id}")

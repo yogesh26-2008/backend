@@ -1,0 +1,88 @@
+"""
+notifications.py
+─────────────────────────────────────────────────────────────────────────────
+REST endpoints for the in-app notification feed.
+
+  GET  /notifications           → paginated list for current user
+  PUT  /notifications/read-all  → mark every notification as read
+  PUT  /notifications/{id}/read → mark one notification as read
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from app.database import get_db
+from app.utils.jwt_handler import get_current_user_id
+from bson import ObjectId
+from bson.errors import InvalidId
+from datetime import datetime, timezone
+import logging
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+@router.get("")
+async def get_notifications(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(40, ge=1, le=100),
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Return notifications for the current user, newest first."""
+    cursor = (
+        db.notifications
+        .find({"recipient_id": user_id})
+        .sort("created_at", -1)
+        .skip(skip)
+        .limit(limit)
+    )
+    docs = await cursor.to_list(length=limit)
+
+    result = []
+    for d in docs:
+        result.append({
+            "id": str(d["_id"]),
+            "type": d.get("type", "follow"),
+            "from_user_id": d.get("from_user_id"),
+            "from_username": d.get("from_username", ""),
+            "from_name": d.get("from_name", ""),
+            "text": d.get("text", ""),
+            "read": d.get("read", False),
+            "created_at": d.get("created_at", ""),
+        })
+
+    return result
+
+
+@router.put("/read-all")
+async def mark_all_read(
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Mark all notifications as read for the current user."""
+    result = await db.notifications.update_many(
+        {"recipient_id": user_id, "read": False},
+        {"$set": {"read": True}},
+    )
+    return {"detail": "ok", "modified": result.modified_count}
+
+
+@router.put("/{notification_id}/read")
+async def mark_one_read(
+    notification_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Mark a single notification as read."""
+    try:
+        oid = ObjectId(notification_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid notification ID")
+
+    result = await db.notifications.update_one(
+        {"_id": oid, "recipient_id": user_id},
+        {"$set": {"read": True}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"detail": "ok"}

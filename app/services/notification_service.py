@@ -80,20 +80,54 @@ def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup
     task.add_done_callback(_pending_tasks.discard)
 
 
-def schedule_follow_notification(fcm_token: Optional[str], follower_username: str, follower_name: str):
+def schedule_follow_notification(
+    fcm_token: Optional[str],
+    follower_username: str,
+    follower_name: str,
+    follower_id: str = "",
+    recipient_id: str = "",
+    db=None,
+):
     """
     Fire-and-forget follow notification.
     Called from follow endpoint — does NOT block the API response.
+    Persists a notification document in MongoDB AND sends an FCM push.
     """
-    if not _initialized:
+    # Always persist — even if FCM is not initialised
+    if db and recipient_id:
+        task_db = asyncio.create_task(
+            _store_follow_notification(db, recipient_id, follower_id, follower_username, follower_name)
+        )
+        _pending_tasks.add(task_db)
+        task_db.add_done_callback(_pending_tasks.discard)
+
+    if not _initialized or not fcm_token:
         return
-    if not fcm_token:
-        return
+
     task = asyncio.create_task(
         _send_follow_notification(fcm_token, follower_username, follower_name)
     )
     _pending_tasks.add(task)
     task.add_done_callback(_pending_tasks.discard)
+
+
+async def _store_follow_notification(db, recipient_id: str, from_user_id: str, from_username: str, from_name: str):
+    """Persist a follow notification document in MongoDB."""
+    from datetime import datetime, timezone
+    try:
+        await db.notifications.insert_one({
+            "recipient_id": recipient_id,
+            "type": "follow",
+            "from_user_id": from_user_id,
+            "from_username": from_username,
+            "from_name": from_name,
+            "text": "started following you",
+            "read": False,
+            "created_at": datetime.now(timezone.utc),
+        })
+        print(f"[NOTIF] ✅ stored follow notification {from_username}→{recipient_id}")
+    except Exception as e:
+        print(f"[NOTIF] ❌ store failed: {e}")
 
 
 async def _send_follow_notification(fcm_token: str, follower_username: str, follower_name: str):
