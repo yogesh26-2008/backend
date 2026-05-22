@@ -50,6 +50,8 @@ class UserResponse(BaseModel):
     is_google_user: bool
     created_at: datetime
     public_key: Optional[str] = None
+    followers_count: int = 0
+    following_count: int = 0
 
 
 class AuthResponse(BaseModel):
