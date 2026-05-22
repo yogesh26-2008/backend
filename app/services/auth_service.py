@@ -30,6 +30,8 @@ def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
         picture=user_doc.get("picture"),
         is_google_user=user_doc.get("is_google_user", False),
         created_at=user_doc["created_at"],
+        followers_count=user_doc.get("followers_count", 0),
+        following_count=user_doc.get("following_count", 0),
     )
     return AuthResponse(access_token=token, user=user, message=message)
 

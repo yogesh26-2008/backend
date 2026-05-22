@@ -148,6 +148,8 @@ async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)
         "is_google_user": user.get("is_google_user", False),
         "created_at":    user["created_at"],
         "public_key":    user.get("public_key"),
+        "followers_count": user.get("followers_count", 0),
+        "following_count": user.get("following_count", 0),
     }
 
 
@@ -376,3 +378,89 @@ async def get_follow_status(
         {"follower_id": current_user_id, "following_id": target_id}
     )
     return {"following": exists is not None}
+
+
+@router.get("/{user_id}/followers")
+async def get_followers(
+    user_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    # Find all follow relations where target is user_id
+    relations = await db.follows.find({"following_id": user_id}).to_list(length=500)
+    follower_ids = [r["follower_id"] for r in relations]
+    
+    if not follower_ids:
+        return []
+        
+    follower_oids = []
+    for fid in follower_ids:
+        try:
+            follower_oids.append(ObjectId(fid))
+        except Exception:
+            continue
+            
+    users = await db.users.find({"_id": {"$in": follower_oids}}).to_list(length=500)
+    
+    # Check which of these followers the current user is following
+    target_ids = [str(u["_id"]) for u in users]
+    following_docs = await db.follows.find(
+        {"follower_id": current_user_id, "following_id": {"$in": target_ids}},
+        {"following_id": 1, "_id": 0},
+    ).to_list(length=500)
+    following_set = {doc["following_id"] for doc in following_docs}
+    
+    return [
+        {
+            "id":          str(u["_id"]),
+            "name":        u["name"],
+            "username":    u["username"],
+            "picture":     u.get("picture"),
+            "public_key":  u.get("public_key"),
+            "is_following": str(u["_id"]) in following_set,
+        }
+        for u in users
+    ]
+
+
+@router.get("/{user_id}/following")
+async def get_following(
+    user_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    # Find all follow relations where follower is user_id
+    relations = await db.follows.find({"follower_id": user_id}).to_list(length=500)
+    following_ids = [r["following_id"] for r in relations]
+    
+    if not following_ids:
+        return []
+        
+    following_oids = []
+    for fid in following_ids:
+        try:
+            following_oids.append(ObjectId(fid))
+        except Exception:
+            continue
+            
+    users = await db.users.find({"_id": {"$in": following_oids}}).to_list(length=500)
+    
+    # Check which of these users the current user is following
+    target_ids = [str(u["_id"]) for u in users]
+    following_docs = await db.follows.find(
+        {"follower_id": current_user_id, "following_id": {"$in": target_ids}},
+        {"following_id": 1, "_id": 0},
+    ).to_list(length=500)
+    following_set = {doc["following_id"] for doc in following_docs}
+    
+    return [
+        {
+            "id":          str(u["_id"]),
+            "name":        u["name"],
+            "username":    u["username"],
+            "picture":     u.get("picture"),
+            "public_key":  u.get("public_key"),
+            "is_following": str(u["_id"]) in following_set,
+        }
+        for u in users
+    ]
