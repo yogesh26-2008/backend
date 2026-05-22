@@ -77,7 +77,6 @@ async def search_users(
     escaped_q = re.escape(q)
     logger.info(f"[SEARCH] user_id={user_id} query='{q}'")
 
-    # Match by USERNAME ONLY — no name, no email (prevents gmail-like results)
     query_filter = {
         "$and": [
             {"_id": {"$ne": ObjectId(user_id)}},
@@ -92,7 +91,6 @@ async def search_users(
     if not users:
         return []
 
-    # Batch-fetch follow statuses in ONE query instead of N queries
     target_ids = [str(u["_id"]) for u in users]
     following_cursor = db.follows.find(
         {"follower_id": user_id, "following_id": {"$in": target_ids}},
@@ -133,7 +131,7 @@ async def follow_user(
         raise HTTPException(status_code=400, detail="Invalid user ID")
 
     # Upsert the follows record (no duplicate)
-    await db.follows.update_one(
+    result = await db.follows.update_one(
         {"follower_id": current_user_id, "following_id": target_id},
         {"$setOnInsert": {
             "follower_id": current_user_id,
@@ -143,24 +141,42 @@ async def follow_user(
         upsert=True,
     )
 
-    # Atomic counter updates
-    await db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": 1}})
-    await db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": 1}})
-
-    # Fire-and-forget notification — fetch target's FCM token + my info in parallel
-    me, target = await asyncio.gather(
-        db.users.find_one({"_id": me_oid},     {"name": 1, "username": 1}),
-        db.users.find_one({"_id": target_oid}, {"fcm_token": 1}),
-    )
-    if me and target:
-        schedule_follow_notification(
-            fcm_token=target.get("fcm_token"),
-            follower_username=me.get("username", ""),
-            follower_name=me.get("name", ""),
-            follower_id=current_user_id,
-            recipient_id=target_id,
-            db=db,
+    # ── FIX: Only update counters + send notification when a NEW follow is created ──
+    # Previously counters incremented even if the user was already following
+    # (upsert found existing doc). This caused inflated follower counts and
+    # duplicate notifications.
+    if result.upserted_id is not None:
+        # New follow — update counters atomically
+        await asyncio.gather(
+            db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": 1}}),
+            db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": 1}}),
         )
+
+        # Fire-and-forget notification — fetch target's FCM token + my info in parallel
+        me, target = await asyncio.gather(
+            db.users.find_one({"_id": me_oid},     {"name": 1, "username": 1}),
+            db.users.find_one({"_id": target_oid}, {"fcm_token": 1}),
+        )
+
+        if me and target:
+            fcm_token = target.get("fcm_token")
+            logger.info(
+                f"[FOLLOW] New follow: {current_user_id} → {target_id} | "
+                f"fcm_token={'present' if fcm_token else 'MISSING'}"
+            )
+            schedule_follow_notification(
+                fcm_token=fcm_token,
+                follower_username=me.get("username", ""),
+                follower_name=me.get("name", ""),
+                follower_id=current_user_id,
+                recipient_id=target_id,
+                db=db,
+            )
+        else:
+            logger.warning(f"[FOLLOW] Could not load user docs for notification: me={me is not None} target={target is not None}")
+    else:
+        # Already following — idempotent, no counter update, no notification
+        logger.info(f"[FOLLOW] Already following: {current_user_id} → {target_id} (no-op)")
 
     logger.info(f"[FOLLOW] {current_user_id} → {target_id}")
     return {"detail": "followed", "following": True}
@@ -184,9 +200,10 @@ async def unfollow_user(
     )
 
     if result.deleted_count > 0:
-        # Only decrement if a record was actually removed
-        await db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": -1}})
-        await db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": -1}})
+        await asyncio.gather(
+            db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": -1}}),
+            db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": -1}}),
+        )
 
     logger.info(f"[UNFOLLOW] {current_user_id} → {target_id}")
     return {"detail": "unfollowed", "following": False}
