@@ -86,3 +86,23 @@ async def mark_one_read(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Notification not found")
     return {"detail": "ok"}
+
+
+@router.delete("/{notification_id}")
+async def delete_notification(
+    notification_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Permanently delete a notification owned by the current user."""
+    try:
+        oid = ObjectId(notification_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid notification ID")
+
+    result = await db.notifications.delete_one(
+        {"_id": oid, "recipient_id": user_id},
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"detail": "ok"}

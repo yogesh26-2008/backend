@@ -106,12 +106,11 @@ async def _create_indexes():
             background=True,
             name="notifications_recipient",
         )
-        await _db.notifications.create_index(
-            [("created_at", ASCENDING)],
-            expireAfterSeconds=2592000,
-            background=True,
-            name="notifications_ttl_30d",
-        )
+        try:
+            await _db.notifications.drop_index("notifications_ttl_30d")
+            print("[DB] Removed notifications TTL index; notifications now persist until deleted.")
+        except Exception:
+            pass
 
         # ── Follows ───────────────────────────────────────────────────────────
         await _db.follows.create_index(
