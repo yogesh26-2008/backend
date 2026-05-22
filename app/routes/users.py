@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.limiter import limiter
 from app.services.notification_service import send_follow_push, is_fcm_ready
 from app.utils.jwt_handler import get_current_user_id
 
@@ -17,6 +18,99 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Compiled once — safe regex, no ReDoS risk
+_USERNAME_RE = re.compile(r"^[a-z0-9_.]{3,20}$")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USERNAME AVAILABILITY CHECK  (public — no auth needed, used during signup)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sanitize_username(raw: str) -> str:
+    s = raw.strip().lower()
+    s = re.sub(r"[\s\-]+", "_", s)       # spaces/hyphens → _
+    s = re.sub(r"[^a-z0-9_.]", "", s)    # drop invalid chars
+    s = re.sub(r"[_.]{2,}", "_", s)       # collapse __ or ..
+    s = s.strip("_.")                      # no leading/trailing _ .
+    return s[:20]                          # hard max-length
+
+
+@router.get("/check-username")
+@limiter.limit("30/minute")
+async def check_username(
+    request: Request,
+    username: str = Query(..., min_length=1, max_length=50),
+    db=Depends(get_db),
+):
+    """
+    Check if a username is available.
+    - No auth required (called before account creation)
+    - Sanitizes input server-side
+    - Uses unique index on username (IXSCAN, not COLLSCAN)
+    - Rate limited: 30/min per IP
+    """
+    clean = _sanitize_username(username)
+
+    if len(clean) < 3:
+        return {
+            "success": False,
+            "error": "TOO_SHORT",
+            "message": "Username must be at least 3 characters",
+        }
+
+    if not _USERNAME_RE.match(clean):
+        return {
+            "success": False,
+            "error": "INVALID",
+            "message": "Only letters, numbers, _ and . allowed",
+        }
+
+    # Indexed lookup — projection: only _id (minimum data fetched)
+    existing = await db.users.find_one({"username": clean}, projection={"_id": 1})
+
+    if existing is None:
+        return {"success": True, "available": True, "sanitized_username": clean}
+
+    # Taken → generate suggestions
+    suggestions = await _build_suggestions(clean, db)
+    return {
+        "success": True,
+        "available": False,
+        "sanitized_username": clean,
+        "suggestions": suggestions,
+    }
+
+
+async def _build_suggestions(base: str, db) -> list:
+    import random
+    year = datetime.now(timezone.utc).year
+    candidates = []
+    for sfx in [str(year % 100), str(year), "hq", "real", "the", "app"]:
+        candidates += [f"{base}{sfx}", f"{base}_{sfx}"]
+    for n in [str(random.randint(1, 999)) for _ in range(8)]:
+        candidates.append(f"{base}{n}")
+    candidates += [f"the_{base}", f"im_{base}"]
+
+    seen, unique = set(), []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            unique.append(c)
+
+    results = []
+    for c in unique:
+        if len(results) >= 5:
+            break
+        if 3 <= len(c) <= 20 and _USERNAME_RE.match(c):
+            taken = await db.users.find_one({"username": c}, projection={"_id": 1})
+            if not taken:
+                results.append(c)
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROFILE & SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/me")
 async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)):
@@ -69,6 +163,10 @@ async def update_public_key(
     return {"detail": "Public key updated"}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SEARCH
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.get("/search")
 async def search_users(
     q: str = "",
@@ -111,7 +209,9 @@ async def search_users(
     ]
 
 
-# ─── Follow / Unfollow / Follow-status ───────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# FOLLOW / UNFOLLOW / FOLLOW-STATUS
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{target_id}/follow")
 async def follow_user(
@@ -129,7 +229,6 @@ async def follow_user(
     except (InvalidId, Exception):
         raise HTTPException(status_code=400, detail="Invalid user ID")
 
-    # ── Upsert follow record ──────────────────────────────────────────────────
     result = await db.follows.update_one(
         {"follower_id": current_user_id, "following_id": target_id},
         {"$setOnInsert": {
@@ -141,13 +240,9 @@ async def follow_user(
     )
 
     if result.upserted_id is None:
-        # Already following — idempotent, nothing to do
         logger.info(f"[FOLLOW] already following {current_user_id}→{target_id}")
         return {"detail": "followed", "following": True}
 
-    # ── New follow ────────────────────────────────────────────────────────────
-
-    # 1. Counters + user info fetched in one parallel batch
     me, target, _, __ = await asyncio.gather(
         db.users.find_one({"_id": me_oid},     {"name": 1, "username": 1}),
         db.users.find_one({"_id": target_oid}, {"fcm_token": 1}),
@@ -164,7 +259,6 @@ async def follow_user(
         f"fcm={'✓' if fcm_token else '✗ MISSING — user must open app'}"
     )
 
-    # 2. Save notification to DB — DIRECTLY AWAITED (guaranteed before response)
     notif_id = str(ObjectId())
     now      = datetime.now(timezone.utc)
     try:
@@ -183,7 +277,6 @@ async def follow_user(
     except Exception as e:
         logger.error(f"[FOLLOW] ❌ notification insert failed: {e}")
 
-    # 3. Real-time WS delivery if recipient is online — DIRECTLY AWAITED
     try:
         from app.services.chat_service import manager
         if target_id in manager.active_connections:
@@ -206,8 +299,6 @@ async def follow_user(
     except Exception as ws_err:
         logger.warning(f"[FOLLOW] WS error: {ws_err}")
 
-    # 4. FCM push — asyncio.create_task() called from ASYNC function (reliable)
-    #    App closed / background / screen off → Android shows system notification
     if fcm_token and is_fcm_ready():
         asyncio.create_task(
             send_follow_push(
