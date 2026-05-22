@@ -3,12 +3,9 @@ notification_service.py
 ─────────────────────────────────────────────────────────────────────────────
 Centralised FCM push notification dispatcher.
 
-Supported notification types
   • welcome  — sent on login / signup
-  • follow   — sent when someone follows the user
+  • follow   — FCM push only (DB insert is done directly in users.py route)
   • message  — sent when a chat message arrives for an offline recipient
-
-All sends are fire-and-forget background tasks with exponential retry.
 """
 
 import asyncio
@@ -25,7 +22,7 @@ _initialized = False
 _pending_tasks: set[asyncio.Task] = set()
 
 _MAX_RETRIES   = 3
-_RETRY_BACKOFF = [0.5, 1, 2]  # 3 delays for 3 retry attempts
+_RETRY_BACKOFF = [0.5, 1, 2]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,12 +62,7 @@ def init_firebase(cred_path: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup: bool):
-    """
-    Enqueue a welcome push to be sent ~2 s after login / signup.
-    Flutter's local notification shows first; this FCM push is the
-    backup for users who background the app immediately.
-    The Flutter onMessage listener suppresses type='welcome' to avoid duplicates.
-    """
+    """Enqueue a welcome push ~2s after login/signup."""
     if not _initialized:
         print("[FCM] ⚠️ Not initialized — skipping welcome")
         return
@@ -82,6 +74,30 @@ def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup
     task.add_done_callback(_pending_tasks.discard)
 
 
+def schedule_follow_fcm_only(
+    fcm_token: str,
+    follower_username: str,
+    follower_name: str,
+    notif_id: str = "",
+):
+    """
+    Fire-and-forget FCM push for a new follow.
+    DB insert and WS delivery are handled DIRECTLY in users.py (awaited).
+    This function ONLY sends the push notification.
+    """
+    if not _initialized:
+        print("[FCM] ⚠️ Not initialized — skipping follow FCM")
+        return
+    if not fcm_token:
+        return
+    task = asyncio.create_task(
+        _send_follow_notification(fcm_token, follower_username, follower_name, notif_id)
+    )
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
+
+
+# Keep old name as alias so any other callers don't break
 def schedule_follow_notification(
     fcm_token: Optional[str],
     follower_username: str,
@@ -91,133 +107,15 @@ def schedule_follow_notification(
     db=None,
 ):
     """
-    Fire-and-forget follow notification.
-    Called from follow endpoint — does NOT block the API response.
-
-    Pre-generates a MongoDB ObjectId so both the DB record and the FCM push
-    carry the same `id`. This lets Flutter deduplicate when a user is online
-    and receives BOTH a WebSocket notification AND an FCM foreground push.
+    Legacy wrapper — only sends FCM, DB insert must be done by caller.
+    Kept for backward compatibility.
     """
-    # Pre-generate notification ID — shared between DB insert and FCM payload
-    notif_id = str(ObjectId())
-
-    # Always persist — even if FCM is not initialised
-    if db and recipient_id:
-        task_db = asyncio.create_task(
-            _store_follow_notification(
-                db, notif_id, recipient_id, follower_id, follower_username, follower_name
-            )
+    if fcm_token:
+        schedule_follow_fcm_only(
+            fcm_token=fcm_token,
+            follower_username=follower_username,
+            follower_name=follower_name,
         )
-        _pending_tasks.add(task_db)
-        task_db.add_done_callback(_pending_tasks.discard)
-
-    if not _initialized or not fcm_token:
-        return
-
-    task = asyncio.create_task(
-        _send_follow_notification(fcm_token, follower_username, follower_name, notif_id)
-    )
-    _pending_tasks.add(task)
-    task.add_done_callback(_pending_tasks.discard)
-
-
-async def _store_follow_notification(
-    db,
-    notif_id: str,
-    recipient_id: str,
-    from_user_id: str,
-    from_username: str,
-    from_name: str,
-):
-    """Persist a follow notification document in MongoDB and deliver via WebSocket."""
-    from datetime import datetime, timezone
-    try:
-        await db.notifications.insert_one({
-            "_id": ObjectId(notif_id),
-            "recipient_id": recipient_id,
-            "type": "follow",
-            "from_user_id": from_user_id,
-            "from_username": from_username,
-            "from_name": from_name,
-            "text": "started following you",
-            "read": False,
-            "created_at": datetime.now(timezone.utc),
-        })
-        print(f"[NOTIF] ✅ stored follow notification {from_username}→{recipient_id} id={notif_id}")
-
-        # Real-time WebSocket delivery if the user is currently online/connected
-        try:
-            from app.services.chat_service import manager
-            if recipient_id in manager.active_connections:
-                payload = json.dumps({
-                    "type": "notification",
-                    "notification": {
-                        "id": notif_id,
-                        "recipient_id": recipient_id,
-                        "type": "follow",
-                        "from_user_id": from_user_id,
-                        "from_username": from_username,
-                        "from_name": from_name,
-                        "text": "started following you",
-                        "read": False,
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                })
-                await manager.send_personal_message(payload, recipient_id)
-                print(f"[NOTIF] ✅ sent real-time WS notification to user {recipient_id}")
-        except Exception as ws_err:
-            print(f"[NOTIF] ⚠️ WebSocket delivery failed: {ws_err}")
-    except Exception as e:
-        print(f"[NOTIF] ❌ store failed: {e}")
-
-
-async def _send_follow_notification(
-    fcm_token: str,
-    follower_username: str,
-    follower_name: str,
-    notif_id: str = "",
-):
-    """Send an FCM push for a new follower."""
-    title = follower_name or follower_username
-    body  = "started following you"
-
-    msg = messaging.Message(
-        notification=messaging.Notification(title=title, body=body),
-        android=messaging.AndroidConfig(
-            priority="high",
-            ttl=3600,
-            notification=messaging.AndroidNotification(
-                title=title,
-                body=body,
-                channel_id="trandia_v4",
-                color="#00C853",
-                tag=f"follow_{follower_username}",  # collapse rapid follows
-            ),
-        ),
-        apns=messaging.APNSConfig(
-            headers={"apns-priority": "10", "apns-push-type": "alert"},
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(
-                    alert=messaging.ApsAlert(
-                        title=title,
-                        subtitle="New follower",
-                        body=body,
-                    ),
-                    badge=1,
-                    sound="default",
-                )
-            ),
-        ),
-        data={
-            "type":     "follow",
-            "id":       notif_id,       # ← shared with DB record for Flutter dedup
-            "username": follower_username,
-            "title":    title,
-            "body":     body,
-        },
-        token=fcm_token,
-    )
-    await _dispatch(msg, label=f"follow→{follower_username}")
 
 
 def schedule_message_notification(
@@ -225,17 +123,7 @@ def schedule_message_notification(
     sender_username: str,
     conversation_id: str,
 ):
-    """
-    Enqueue a 'new message' push for a recipient who is currently offline
-    (i.e. has no active WebSocket connection).
-
-    Since messages are E2E-encrypted the backend cannot read the content —
-    so the notification body uses a generic template identical to WhatsApp /
-    Instagram ("sent you a message").
-
-    The notification carries a data payload so the Flutter app can route
-    directly to the correct conversation when tapped.
-    """
+    """Enqueue a 'new message' push for an offline recipient."""
     if not _initialized:
         return
     if not fcm_token:
@@ -302,8 +190,59 @@ async def _send_welcome(fcm_token: str, name: str, is_signup: bool):
         },
         token=fcm_token,
     )
-
     await _dispatch(msg, label=f"welcome→{first_name}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal helpers — follow
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _send_follow_notification(
+    fcm_token: str,
+    follower_username: str,
+    follower_name: str,
+    notif_id: str = "",
+):
+    title = follower_name or follower_username
+    body  = "started following you"
+
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        android=messaging.AndroidConfig(
+            priority="high",
+            ttl=3600,
+            notification=messaging.AndroidNotification(
+                title=title,
+                body=body,
+                channel_id="trandia_v4",
+                color="#00C853",
+                tag=f"follow_{follower_username}",
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10", "apns-push-type": "alert"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title=title,
+                        subtitle="New follower",
+                        body=body,
+                    ),
+                    badge=1,
+                    sound="default",
+                )
+            ),
+        ),
+        data={
+            "type":     "follow",
+            "id":       notif_id,
+            "username": follower_username,
+            "title":    title,
+            "body":     body,
+        },
+        token=fcm_token,
+    )
+    await _dispatch(msg, label=f"follow→{follower_username}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -361,7 +300,6 @@ async def _send_message_notification(
         },
         token=fcm_token,
     )
-
     await _dispatch(msg, label=f"msg→{sender_username}")
 
 
