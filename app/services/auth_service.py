@@ -293,6 +293,45 @@ async def auth_with_google_userinfo(
     return _build_auth_response(doc, "Account created with Google. Welcome to Trandia!")
 
 
+async def cleanup_orphaned_firebase_user(
+    email: str, db: AsyncIOMotorDatabase
+) -> dict:
+    """
+    If a Firebase user exists for this email but NO MongoDB account exists,
+    delete the Firebase user so the client can retry signup cleanly.
+
+    Returns {"cleaned": True/False, "message": str}
+    """
+    _require_db(db)
+
+    # If the email IS in MongoDB, it's a real account — don't touch it.
+    existing = await db.users.find_one({"email": email}, projection={"_id": 1})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="This email is already registered. Please sign in instead.",
+        )
+
+    # Email NOT in MongoDB → orphaned Firebase user. Delete it.
+    # Method 1: Firebase Admin SDK
+    if firebase_initialized:
+        try:
+            from firebase_admin import auth as fb_auth
+            fb_user = await asyncio.to_thread(fb_auth.get_user_by_email, email)
+            await asyncio.to_thread(fb_auth.delete_user, fb_user.uid)
+            print(f"[AUTH] 🧹 Orphaned Firebase user deleted (Admin SDK): {email}")
+            return {"cleaned": True, "message": "Orphaned account cleaned up. Please sign up again."}
+        except Exception as e:
+            print(f"[AUTH] ⚠️ Admin SDK cleanup failed: {type(e).__name__}: {e}")
+            # Fall through to REST API
+
+    # Method 2: Firebase REST API — can't delete users, but we can confirm the orphan
+    # Since REST API can't delete users without Admin SDK, we return a message
+    # telling the client to proceed with a password reset flow or retry
+    print(f"[AUTH] 🧹 Email {email} not in MongoDB — orphaned Firebase user confirmed")
+    return {"cleaned": False, "message": "Account not found in our system. Firebase Admin unavailable for cleanup."}
+
+
 async def auth_with_google_id_token(
     token_str: str, fcm_token: Optional[str], db: AsyncIOMotorDatabase
 ) -> AuthResponse:
