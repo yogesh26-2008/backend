@@ -1,11 +1,9 @@
 """
 notification_service.py
 ─────────────────────────────────────────────────────────────────────────────
-Centralised FCM push notification dispatcher.
-
-  • welcome  — sent on login / signup
-  • follow   — FCM push only (DB insert is done directly in users.py route)
-  • message  — sent when a chat message arrives for an offline recipient
+FCM push dispatcher.
+DB insert + WS delivery is handled in users.py (directly awaited).
+This module only sends FCM pushes.
 """
 
 import asyncio
@@ -16,10 +14,8 @@ from typing import Optional
 
 import firebase_admin
 from firebase_admin import credentials, messaging
-from bson import ObjectId
 
 _initialized = False
-_pending_tasks: set[asyncio.Task] = set()
 
 _MAX_RETRIES   = 3
 _RETRY_BACKOFF = [0.5, 1, 2]
@@ -57,152 +53,26 @@ def init_firebase(cred_path: str):
         print("[FCM] ⚠️ No credentials — notifications disabled")
 
 
+def is_fcm_ready() -> bool:
+    return _initialized
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Public API
+# Async send functions — call these directly with asyncio.create_task()
+# from within async route handlers. Never wrap in sync functions.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup: bool):
-    """Enqueue a welcome push ~2s after login/signup."""
-    if not _initialized:
-        print("[FCM] ⚠️ Not initialized — skipping welcome")
-        return
-    if not fcm_token:
-        print("[FCM] ⚠️ No FCM token — skipping welcome")
-        return
-    task = asyncio.create_task(_send_welcome_with_delay(fcm_token, name, is_signup))
-    _pending_tasks.add(task)
-    task.add_done_callback(_pending_tasks.discard)
-
-
-def schedule_follow_fcm_only(
+async def send_follow_push(
     fcm_token: str,
     follower_username: str,
     follower_name: str,
     notif_id: str = "",
 ):
     """
-    Fire-and-forget FCM push for a new follow.
-    DB insert and WS delivery are handled DIRECTLY in users.py (awaited).
-    This function ONLY sends the push notification.
+    Send FCM push for a new follower.
+    Call as: asyncio.create_task(send_follow_push(...))
+    from within an async route handler.
     """
-    if not _initialized:
-        print("[FCM] ⚠️ Not initialized — skipping follow FCM")
-        return
-    if not fcm_token:
-        return
-    task = asyncio.create_task(
-        _send_follow_notification(fcm_token, follower_username, follower_name, notif_id)
-    )
-    _pending_tasks.add(task)
-    task.add_done_callback(_pending_tasks.discard)
-
-
-# Keep old name as alias so any other callers don't break
-def schedule_follow_notification(
-    fcm_token: Optional[str],
-    follower_username: str,
-    follower_name: str,
-    follower_id: str = "",
-    recipient_id: str = "",
-    db=None,
-):
-    """
-    Legacy wrapper — only sends FCM, DB insert must be done by caller.
-    Kept for backward compatibility.
-    """
-    if fcm_token:
-        schedule_follow_fcm_only(
-            fcm_token=fcm_token,
-            follower_username=follower_username,
-            follower_name=follower_name,
-        )
-
-
-def schedule_message_notification(
-    fcm_token: Optional[str],
-    sender_username: str,
-    conversation_id: str,
-):
-    """Enqueue a 'new message' push for an offline recipient."""
-    if not _initialized:
-        return
-    if not fcm_token:
-        return
-    task = asyncio.create_task(
-        _send_message_notification(fcm_token, sender_username, conversation_id)
-    )
-    _pending_tasks.add(task)
-    task.add_done_callback(_pending_tasks.discard)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Internal helpers — welcome
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _send_welcome_with_delay(fcm_token: str, name: str, is_signup: bool):
-    await asyncio.sleep(2)
-    await _send_welcome(fcm_token, name, is_signup)
-
-
-async def _send_welcome(fcm_token: str, name: str, is_signup: bool):
-    first_name = name.split()[0] if name else "there"
-
-    if is_signup:
-        title    = "Welcome to Trandia ✦"
-        subtitle = "Your account is ready"
-        body     = (
-            f"Hi {first_name}, you're all set. "
-            "Explore conversations and connect with people around you."
-        )
-    else:
-        title    = f"Welcome back, {first_name} ✦"
-        subtitle = "Great to have you back"
-        body     = "Your feed and conversations are right where you left them."
-
-    msg = messaging.Message(
-        notification=messaging.Notification(title=title, body=body),
-        android=messaging.AndroidConfig(
-            priority="high",
-            ttl=3600,
-            notification=messaging.AndroidNotification(
-                title=title,
-                body=body,
-                channel_id="trandia_v4",
-                color="#00C853",
-                tag="trandia_welcome",
-            ),
-        ),
-        apns=messaging.APNSConfig(
-            headers={"apns-priority": "10", "apns-push-type": "alert"},
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(
-                    alert=messaging.ApsAlert(title=title, subtitle=subtitle, body=body),
-                    badge=1,
-                    sound="default",
-                )
-            ),
-        ),
-        data={
-            "type": "welcome",
-            "event": "signup" if is_signup else "login",
-            "title": title,
-            "body": body,
-        },
-        token=fcm_token,
-    )
-    await _dispatch(msg, label=f"welcome→{first_name}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Internal helpers — follow
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _send_follow_notification(
-    fcm_token: str,
-    follower_username: str,
-    follower_name: str,
-    notif_id: str = "",
-):
     title = follower_name or follower_username
     body  = "started following you"
 
@@ -245,15 +115,12 @@ async def _send_follow_notification(
     await _dispatch(msg, label=f"follow→{follower_username}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Internal helpers — message notification
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _send_message_notification(
+async def send_message_push(
     fcm_token: str,
     sender_username: str,
     conversation_id: str,
 ):
+    """Send FCM push for a new message."""
     title = sender_username
     body  = "sent you a message 💬"
 
@@ -274,8 +141,8 @@ async def _send_message_notification(
         ),
         apns=messaging.APNSConfig(
             headers={
-                "apns-priority":  "10",
-                "apns-push-type": "alert",
+                "apns-priority":    "10",
+                "apns-push-type":   "alert",
                 "apns-collapse-id": conversation_id,
             },
             payload=messaging.APNSPayload(
@@ -303,6 +170,79 @@ async def _send_message_notification(
     await _dispatch(msg, label=f"msg→{sender_username}")
 
 
+async def send_welcome_push(fcm_token: str, name: str, is_signup: bool):
+    """Send welcome push ~2s after login/signup."""
+    await asyncio.sleep(2)
+    first_name = name.split()[0] if name else "there"
+
+    if is_signup:
+        title = "Welcome to Trandia ✦"
+        body  = f"Hi {first_name}, you're all set."
+    else:
+        title = f"Welcome back, {first_name} ✦"
+        body  = "Your feed and conversations are right where you left them."
+
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        android=messaging.AndroidConfig(
+            priority="high", ttl=3600,
+            notification=messaging.AndroidNotification(
+                title=title, body=body,
+                channel_id="trandia_v4", color="#00C853", tag="trandia_welcome",
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10", "apns-push-type": "alert"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(title=title, body=body),
+                    badge=1, sound="default",
+                )
+            ),
+        ),
+        data={"type": "welcome", "event": "signup" if is_signup else "login",
+              "title": title, "body": body},
+        token=fcm_token,
+    )
+    await _dispatch(msg, label=f"welcome→{first_name}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy sync wrappers — kept so auth.py / chat.py don't break
+# These schedule tasks from within sync context; only use from async callers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup: bool):
+    if not _initialized or not fcm_token:
+        return
+    asyncio.create_task(send_welcome_push(fcm_token, name, is_signup))
+
+
+def schedule_message_notification(
+    fcm_token: Optional[str],
+    sender_username: str,
+    conversation_id: str,
+):
+    if not _initialized or not fcm_token:
+        return
+    asyncio.create_task(send_message_push(fcm_token, sender_username, conversation_id))
+
+
+# Backward-compat stub (DB insert removed — handled in users.py)
+def schedule_follow_notification(
+    fcm_token: Optional[str],
+    follower_username: str = "",
+    follower_name: str = "",
+    follower_id: str = "",
+    recipient_id: str = "",
+    db=None,
+):
+    if _initialized and fcm_token:
+        asyncio.create_task(
+            send_follow_push(fcm_token, follower_username, follower_name)
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared dispatcher with retry
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,5 +260,4 @@ async def _dispatch(msg: messaging.Message, label: str):
                 wait = _RETRY_BACKOFF[attempt]
                 print(f"[FCM] ⚠️ {label} attempt {attempt + 1} failed: {e} — retry in {wait}s")
                 await asyncio.sleep(wait)
-
     print(f"[FCM] ❌ {label} failed after {_MAX_RETRIES} attempts: {last_error}")
