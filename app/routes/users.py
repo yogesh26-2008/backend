@@ -107,6 +107,28 @@ async def _build_suggestions(base: str, db) -> list:
                 results.append(c)
     return results
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EMAIL AVAILABILITY CHECK  (public — no auth needed, used during signup)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/check-email")
+@limiter.limit("10/minute")
+async def check_email(
+    request: Request,
+    email: str = Query(..., min_length=3, max_length=100),
+    db=Depends(get_db),
+):
+    """
+    Check if an email is already registered in MongoDB.
+    - No auth required (called during signup to detect orphaned Firebase users)
+    - Uses unique index on email (IXSCAN, not COLLSCAN)
+    - Rate limited: 10/min per IP
+    """
+    clean = email.strip().lower()
+    existing = await db.users.find_one({"email": clean}, projection={"_id": 1})
+    return {"exists": existing is not None}
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROFILE & SETTINGS

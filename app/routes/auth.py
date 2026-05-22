@@ -9,6 +9,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature
 from app.config import settings
 from app.database import get_db
 from app.limiter import limiter
+from pydantic import BaseModel, EmailStr
 from app.models.user import (
     UserLogin,
     GoogleTokenRequest,
@@ -16,6 +17,11 @@ from app.models.user import (
     FirebaseSignupRequest,
 )
 from app.services import auth_service
+
+
+class CleanupFirebaseRequest(BaseModel):
+    email: EmailStr
+
 
 router = APIRouter()
 _signer = URLSafeTimedSerializer(settings.app_secret_key)
@@ -51,6 +57,19 @@ async def signup(request: Request, data: FirebaseSignupRequest, db=Depends(get_d
     Flutter verifies email via Firebase, gets ID token, sends here.
     """
     return await auth_service.signup_with_firebase_verified_email(data, db)
+
+
+@router.post("/cleanup-orphaned-firebase")
+@limiter.limit("5/minute")
+async def cleanup_orphaned_firebase(
+    request: Request, data: CleanupFirebaseRequest, db=Depends(get_db)
+):
+    """
+    Clean up orphaned Firebase users that exist in Firebase but not in MongoDB.
+    Called by Flutter when a signup fails due to email-already-in-use in Firebase
+    but the email is not actually registered in our database.
+    """
+    return await auth_service.cleanup_orphaned_firebase_user(data.email, db)
 
 
 # ── Login ─────────────────────────────────────────────────────────────────────
