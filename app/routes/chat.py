@@ -93,6 +93,8 @@ async def react_to_message(
     emoji = body.get("emoji", "").strip()
     if not emoji:
         raise HTTPException(status_code=400, detail="emoji is required")
+    if len(emoji) > 10:
+        raise HTTPException(status_code=400, detail="Invalid emoji")
 
     try:
         reactions, conv_id = await toggle_reaction(message_id, user_id, emoji, db)
@@ -251,6 +253,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
                     if not conv_id or not text:
                         continue
+                    if len(text) > 10000:
+                        continue
 
                     try:
                         msg_res, participants = await save_message(
@@ -318,6 +322,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     emoji      = (data.get("emoji") or "").strip()
                     message_id = (data.get("message_id") or "").strip()
                     if not conv_id or not emoji or not message_id:
+                        continue
+                    if len(emoji) > 10:
                         continue
 
                     try:

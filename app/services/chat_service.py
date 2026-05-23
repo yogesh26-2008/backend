@@ -175,6 +175,9 @@ async def save_message(
     reply_to_text: Optional[str] = None,
 ):
     """Save a message and atomically increment unread counts."""
+    if len(text) > 10000:
+        raise ValueError("Message too long (max 10000 characters)")
+
     # Verify conversation exists and user is participant
     conv = await db.conversations.find_one({
         "_id": ObjectId(conversation_id),
