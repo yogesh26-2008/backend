@@ -1,4 +1,5 @@
 import asyncio
+import bcrypt as _bcrypt
 import httpx
 import base64
 import json as json_lib
@@ -16,7 +17,9 @@ from app.utils.jwt_handler import create_access_token
 from app.utils.password import hash_password, verify_password
 from app.services.notification_service import schedule_welcome_notification, _initialized as firebase_initialized
 
-_DUMMY_HASH = "$2b$12$invalidhashfortimingequalisation.AAAAAAAAAAAAAAAAAAAAAA"
+# Valid bcrypt hash used only for timing equalization (prevents user-enumeration via
+# response-time differences). Computed once at startup with cost 4 so it adds ~5 ms.
+_DUMMY_HASH: str = _bcrypt.hashpw(b"__timing_equalization__", _bcrypt.gensalt(4)).decode()
 
 
 def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
