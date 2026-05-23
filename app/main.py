@@ -27,7 +27,13 @@ class LimitUploadSize(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.method == 'POST':
             if 'content-length' in request.headers:
-                content_length = int(request.headers['content-length'])
+                try:
+                    content_length = int(request.headers['content-length'])
+                except ValueError:
+                    return JSONResponse(
+                        status_code=400,
+                        content={'detail': 'Invalid Content-Length header'}
+                    )
                 if content_length > self.max_upload_size:
                     return JSONResponse(
                         status_code=413,
@@ -266,10 +272,10 @@ async def log_requests(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    print(f"[ERROR] {request.method} {request.url.path} → {type(exc).__name__}: {exc}")
+    logger.error(f"[ERROR] {request.method} {request.url.path} → {type(exc).__name__}: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Server error: {type(exc).__name__}"},
+        content={"detail": "Internal server error"},
         headers={"Access-Control-Allow-Origin": "*"},
     )
 

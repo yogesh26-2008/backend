@@ -97,15 +97,18 @@ async def _build_suggestions(base: str, db) -> list:
             seen.add(c)
             unique.append(c)
 
-    results = []
-    for c in unique:
-        if len(results) >= 5:
-            break
-        if 3 <= len(c) <= 20 and _USERNAME_RE.match(c):
-            taken = await db.users.find_one({"username": c}, projection={"_id": 1})
-            if not taken:
-                results.append(c)
-    return results
+    # Filter valid candidates first, then do ONE bulk query instead of N find_one calls
+    valid = [c for c in unique if 3 <= len(c) <= 20 and _USERNAME_RE.match(c)][:15]
+    if not valid:
+        return []
+
+    taken_docs = await db.users.find(
+        {"username": {"$in": valid}},
+        projection={"username": 1, "_id": 0},
+    ).to_list(length=len(valid))
+    taken_set = {doc["username"] for doc in taken_docs}
+
+    return [c for c in valid if c not in taken_set][:5]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EMAIL AVAILABILITY CHECK  (public — no auth needed, used during signup)
@@ -192,7 +195,9 @@ async def update_public_key(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/search")
+@limiter.limit("20/minute")
 async def search_users(
+    request: Request,
     q: str = "",
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
@@ -359,9 +364,16 @@ async def unfollow_user(
         {"follower_id": current_user_id, "following_id": target_id}
     )
     if result.deleted_count > 0:
+        # Aggregation pipeline update prevents counters from going below 0
         await asyncio.gather(
-            db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": -1}}),
-            db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": -1}}),
+            db.users.update_one(
+                {"_id": me_oid},
+                [{"$set": {"following_count": {"$max": [0, {"$subtract": ["$following_count", 1]}]}}}],
+            ),
+            db.users.update_one(
+                {"_id": target_oid},
+                [{"$set": {"followers_count": {"$max": [0, {"$subtract": ["$followers_count", 1]}]}}}],
+            ),
         )
 
     logger.info(f"[UNFOLLOW] {current_user_id}→{target_id}")

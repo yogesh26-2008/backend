@@ -90,18 +90,3 @@ class FirebaseSignupRequest(BaseModel):
             raise ValueError("Username must be at least 3 characters")
         return v
 
-
-# ── Legacy OTP models (kept for reference) ───────────────────────────────────
-
-class SignupInitiateResponse(BaseModel):
-    message: str
-    email: str
-
-
-class VerifyEmailRequest(BaseModel):
-    email: EmailStr
-    otp: str
-
-
-class ResendOtpRequest(BaseModel):
-    email: EmailStr
