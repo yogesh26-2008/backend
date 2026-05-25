@@ -212,8 +212,13 @@ async def send_welcome_push(fcm_token: str, name: str, is_signup: bool):
 # These schedule tasks from within sync context; only use from async callers.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def schedule_welcome_notification(fcm_token: Optional[str], name: str, is_signup: bool):
-    if not _initialized or not fcm_token:
+def schedule_welcome_notification(
+    fcm_token: Optional[str],
+    name: str,
+    is_signup: bool,
+    master_enabled: bool = True,
+):
+    if not _initialized or not fcm_token or not master_enabled:
         return
     asyncio.create_task(send_welcome_push(fcm_token, name, is_signup))
 

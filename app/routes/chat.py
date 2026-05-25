@@ -198,16 +198,20 @@ async def _push_to_eligible_recipients(
 
     cursor = db.users.find(
         {"_id": {"$in": object_ids}, "fcm_token": {"$exists": True, "$ne": None}},
-        {"fcm_token": 1},
+        {"fcm_token": 1, "notification_settings": 1},
     )
     async for user_doc in cursor:
         fcm_token = user_doc.get("fcm_token")
-        if fcm_token:
-            schedule_message_notification(
-                fcm_token=fcm_token,
-                sender_username=sender_username,
-                conversation_id=conversation_id,
-            )
+        if not fcm_token:
+            continue
+        _ns = user_doc.get("notification_settings", {})
+        if not _ns.get("master", True) or not _ns.get("messages", True):
+            continue
+        schedule_message_notification(
+            fcm_token=fcm_token,
+            sender_username=sender_username,
+            conversation_id=conversation_id,
+        )
 
 
 @router.websocket("/ws")
