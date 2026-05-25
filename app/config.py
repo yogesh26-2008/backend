@@ -29,6 +29,14 @@ class Settings(BaseSettings):
 
     brevo_api_key: str = ""
 
+    # ── Media storage (Cloudinary by default) ────────────────────────────────
+    # To swap provider: change media_provider and add provider-specific vars below.
+    media_provider: str = "cloudinary"
+
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: str = ""
+    cloudinary_api_secret: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @field_validator("app_secret_key")

@@ -17,5 +17,6 @@ certifi
 truststore
 slowapi==0.1.9
 redis[asyncio]==5.2.0
+cloudinary==1.41.0
 pytest==8.3.3
 pytest-asyncio==0.24.0
