@@ -225,7 +225,8 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     if data.fcm_token:
         user["fcm_token"] = data.fcm_token
 
-    schedule_welcome_notification(data.fcm_token, user["name"], is_signup=False)
+    notif_master = user.get("notification_settings", {}).get("master", True)
+    schedule_welcome_notification(data.fcm_token, user["name"], is_signup=False, master_enabled=notif_master)
     return _build_auth_response(user, "Welcome back to Trandia!")
 
 
@@ -258,7 +259,8 @@ async def auth_with_google_userinfo(
         existing.update({"picture": picture})
         if fcm_token:
             existing["fcm_token"] = fcm_token
-        schedule_welcome_notification(fcm_token, existing["name"], is_signup=False)
+        notif_master = existing.get("notification_settings", {}).get("master", True)
+        schedule_welcome_notification(fcm_token, existing["name"], is_signup=False, master_enabled=notif_master)
         return _build_auth_response(existing, "Welcome back to Trandia!")
 
     base_username = email.split("@")[0].lower().replace(".", "")
@@ -289,7 +291,8 @@ async def auth_with_google_userinfo(
         if key == "email":
             existing = await db.users.find_one({"email": email})
             if existing:
-                schedule_welcome_notification(fcm_token, existing["name"], is_signup=False)
+                notif_master = existing.get("notification_settings", {}).get("master", True)
+                schedule_welcome_notification(fcm_token, existing["name"], is_signup=False, master_enabled=notif_master)
                 return _build_auth_response(existing, "Welcome back to Trandia!")
         raise HTTPException(status_code=400, detail="Account already exists")
 

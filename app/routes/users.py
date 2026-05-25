@@ -241,6 +241,40 @@ async def update_fcm_token(
     return {"detail": "FCM token updated"}
 
 
+class NotificationSettingsUpdate(BaseModel):
+    master:   bool = True
+    follows:  bool = True
+    likes:    bool = True
+    comments: bool = True
+    messages: bool = True
+    stories:  bool = True
+    mentions: bool = True
+
+
+@router.put("/me/notification-settings")
+async def update_notification_settings(
+    data: NotificationSettingsUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {
+            "notification_settings": {
+                "master":   data.master,
+                "follows":  data.follows,
+                "likes":    data.likes,
+                "comments": data.comments,
+                "messages": data.messages,
+                "stories":  data.stories,
+                "mentions": data.mentions,
+            },
+            "updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    return {"detail": "Notification settings updated"}
+
+
 class PublicKeyUpdate(BaseModel):
     public_key: str
 
@@ -451,14 +485,17 @@ async def follow_user(
 
     me, target, _, __ = await asyncio.gather(
         db.users.find_one({"_id": me_oid},     {"name": 1, "username": 1}),
-        db.users.find_one({"_id": target_oid}, {"fcm_token": 1}),
+        db.users.find_one({"_id": target_oid}, {"fcm_token": 1, "notification_settings": 1}),
         db.users.update_one({"_id": me_oid},     {"$inc": {"following_count": 1}}),
         db.users.update_one({"_id": target_oid}, {"$inc": {"followers_count": 1}}),
     )
 
-    follower_username = (me  or {}).get("username", "")
-    follower_name     = (me  or {}).get("name",     "")
-    fcm_token         = (target or {}).get("fcm_token")
+    follower_username    = (me     or {}).get("username", "")
+    follower_name        = (me     or {}).get("name",     "")
+    fcm_token            = (target or {}).get("fcm_token")
+    _tns                 = (target or {}).get("notification_settings", {})
+    target_notif_master  = _tns.get("master",  True)
+    target_notif_follows = _tns.get("follows", True)
 
     logger.info(
         f"[FOLLOW] {current_user_id}({follower_username}) → {target_id} | "
@@ -505,7 +542,7 @@ async def follow_user(
     except Exception as ws_err:
         logger.warning(f"[FOLLOW] WS error: {ws_err}")
 
-    if fcm_token and is_fcm_ready():
+    if fcm_token and is_fcm_ready() and target_notif_master and target_notif_follows:
         asyncio.create_task(
             send_follow_push(
                 fcm_token=fcm_token,
@@ -516,9 +553,11 @@ async def follow_user(
         )
         logger.info(f"[FOLLOW] 📲 FCM task scheduled for {target_id}")
     else:
-        if not fcm_token:
+        if not target_notif_master or not target_notif_follows:
+            logger.info(f"[FOLLOW] 🔕 FCM skipped — {target_id} has follow notifications disabled")
+        elif not fcm_token:
             logger.warning(f"[FOLLOW] ⚠️ No FCM token for {target_id} — push skipped")
-        if not is_fcm_ready():
+        elif not is_fcm_ready():
             logger.warning("[FOLLOW] ⚠️ Firebase not initialized — push skipped")
 
     return {"detail": "followed", "following": True}
