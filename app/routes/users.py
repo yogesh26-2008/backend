@@ -143,17 +143,80 @@ async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return {
-        "id":            str(user["_id"]),
-        "name":          user["name"],
-        "username":      user["username"],
-        "email":         user["email"],
-        "picture":       user.get("picture"),
-        "is_google_user": user.get("is_google_user", False),
-        "created_at":    user["created_at"],
-        "public_key":    user.get("public_key"),
+        "id":              str(user["_id"]),
+        "name":            user["name"],
+        "username":        user["username"],
+        "email":           user["email"],
+        "picture":         user.get("picture"),
+        "is_google_user":  user.get("is_google_user", False),
+        "created_at":      user["created_at"],
+        "public_key":      user.get("public_key"),
         "followers_count": user.get("followers_count", 0),
         "following_count": user.get("following_count", 0),
+        "bio":             user.get("bio", ""),
+        "link":            user.get("link", ""),
+        "snapchat_link":   user.get("snapchat_link", ""),
+        "instagram_link":  user.get("instagram_link", ""),
+        "whatsapp_link":   user.get("whatsapp_link", ""),
+        "facebook_link":   user.get("facebook_link", ""),
+        "twitter_link":    user.get("twitter_link", ""),
+        "youtube_link":    user.get("youtube_link", ""),
     }
+
+
+class ProfileUpdate(BaseModel):
+    name: str = ""
+    username: str = ""
+    bio: str = ""
+    link: str = ""
+    snapchat_link: str = ""
+    instagram_link: str = ""
+    whatsapp_link: str = ""
+    facebook_link: str = ""
+    twitter_link: str = ""
+    youtube_link: str = ""
+
+
+@router.put("/me")
+@limiter.limit("10/minute")
+async def update_me(
+    request: Request,
+    data: ProfileUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    update_dict: dict = {}
+
+    name = data.name.strip()
+    if name:
+        update_dict["name"] = name[:100]
+
+    if data.username.strip():
+        clean = _sanitize_username(data.username)
+        if len(clean) < 3:
+            raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+        if not _USERNAME_RE.match(clean):
+            raise HTTPException(status_code=400, detail="Invalid username format")
+        existing = await db.users.find_one(
+            {"username": clean, "_id": {"$ne": ObjectId(user_id)}},
+            projection={"_id": 1},
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="Username already taken")
+        update_dict["username"] = clean
+
+    update_dict["bio"]            = data.bio.strip()[:300]
+    update_dict["link"]           = data.link.strip()[:500]
+    update_dict["snapchat_link"]  = data.snapchat_link.strip()[:500]
+    update_dict["instagram_link"] = data.instagram_link.strip()[:500]
+    update_dict["whatsapp_link"]  = data.whatsapp_link.strip()[:500]
+    update_dict["facebook_link"]  = data.facebook_link.strip()[:500]
+    update_dict["twitter_link"]   = data.twitter_link.strip()[:500]
+    update_dict["youtube_link"]   = data.youtube_link.strip()[:500]
+    update_dict["updated_at"]     = datetime.now(timezone.utc)
+
+    await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": update_dict})
+    return {"detail": "Profile updated"}
 
 
 class FCMTokenUpdate(BaseModel):
@@ -236,6 +299,50 @@ async def search_users(
         }
         for u in users
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC USER PROFILE  (any authenticated user can view any other user)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{user_id}")
+async def get_user_profile(
+    user_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    try:
+        oid = ObjectId(user_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+
+    user = await db.users.find_one({"_id": oid})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    follow_doc = await db.follows.find_one(
+        {"follower_id": current_user_id, "following_id": user_id},
+        projection={"_id": 1},
+    )
+
+    return {
+        "id":              str(user["_id"]),
+        "name":            user["name"],
+        "username":        user["username"],
+        "picture":         user.get("picture"),
+        "public_key":      user.get("public_key"),
+        "followers_count": user.get("followers_count", 0),
+        "following_count": user.get("following_count", 0),
+        "bio":             user.get("bio", ""),
+        "link":            user.get("link", ""),
+        "snapchat_link":   user.get("snapchat_link", ""),
+        "instagram_link":  user.get("instagram_link", ""),
+        "whatsapp_link":   user.get("whatsapp_link", ""),
+        "facebook_link":   user.get("facebook_link", ""),
+        "twitter_link":    user.get("twitter_link", ""),
+        "youtube_link":    user.get("youtube_link", ""),
+        "is_following":    follow_doc is not None,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
