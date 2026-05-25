@@ -14,7 +14,9 @@ from app.config import settings
 from app.database import connect_db, close_db
 from app.limiter import limiter
 from app.services.notification_service import init_firebase
+from app.services.media_service import init_media_provider
 from app.routes import auth, users, posts, chat, notifications
+from app.routes import media as media_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -218,6 +220,13 @@ async def lifespan(app: FastAPI):
         init_firebase(settings.firebase_credentials_path)
     except Exception as e:
         print(f"[STARTUP] Firebase init error: {e}")
+    try:
+        if settings.cloudinary_cloud_name:
+            init_media_provider(settings)
+        else:
+            print("[STARTUP] Cloudinary not configured — set CLOUDINARY_* vars in .env")
+    except Exception as e:
+        print(f"[STARTUP] Media provider init error: {e}")
     yield
     await close_db()
 
@@ -243,7 +252,7 @@ app.add_middleware(
     max_age=3600,
 )
 
-app.add_middleware(LimitUploadSize, max_upload_size=10 * 1024 * 1024)  # 10MB max
+app.add_middleware(LimitUploadSize, max_upload_size=105 * 1024 * 1024)  # 105 MB (videos up to 100 MB)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.middleware("http")
@@ -285,6 +294,7 @@ app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(posts.router, prefix="/posts", tags=["Posts"])
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
+app.include_router(media_router.router, prefix="/media", tags=["Media"])
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
