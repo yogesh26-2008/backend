@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from typing import Optional
 from pydantic import BaseModel
 
 from app.database import get_db
@@ -161,6 +162,10 @@ async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)
         "facebook_link":   user.get("facebook_link", ""),
         "twitter_link":    user.get("twitter_link", ""),
         "youtube_link":    user.get("youtube_link", ""),
+        "location_city":   user.get("location_city", ""),
+        "location_public": user.get("location_public", True),
+        "location_lat":    user.get("location_lat"),
+        "location_lng":    user.get("location_lng"),
     }
 
 
@@ -254,6 +259,69 @@ async def update_public_key(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LOCATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LocationUpdate(BaseModel):
+    latitude: float
+    longitude: float
+    city: Optional[str] = ""
+
+
+class LocationPrivacyUpdate(BaseModel):
+    is_public: bool
+
+
+@router.put("/me/location")
+@limiter.limit("10/minute")
+async def update_my_location(
+    request: Request,
+    data: LocationUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    if not (-90 <= data.latitude <= 90) or not (-180 <= data.longitude <= 180):
+        raise HTTPException(status_code=400, detail="Invalid coordinates")
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {
+            "location_lat":        data.latitude,
+            "location_lng":        data.longitude,
+            "location_city":       (data.city or "").strip()[:100],
+            "location_updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    return {"detail": "Location updated"}
+
+
+@router.delete("/me/location")
+async def remove_my_location(
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$unset": {"location_lat": "", "location_lng": "", "location_city": ""}},
+    )
+    return {"detail": "Location removed"}
+
+
+@router.put("/me/location-privacy")
+@limiter.limit("20/minute")
+async def update_location_privacy(
+    request: Request,
+    data: LocationPrivacyUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"location_public": data.is_public, "updated_at": datetime.now(timezone.utc)}},
+    )
+    return {"detail": "Location privacy updated"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SEARCH
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -342,6 +410,8 @@ async def get_user_profile(
         "twitter_link":    user.get("twitter_link", ""),
         "youtube_link":    user.get("youtube_link", ""),
         "is_following":    follow_doc is not None,
+        "location_city":   user.get("location_city", "") if user.get("location_public", True) else "",
+        "location_public": user.get("location_public", True),
     }
 
 
