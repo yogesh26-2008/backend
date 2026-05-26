@@ -180,6 +180,7 @@ class ProfileUpdate(BaseModel):
     facebook_link: str = ""
     twitter_link: str = ""
     youtube_link: str = ""
+    picture: Optional[str] = None
 
 
 @router.put("/me")
@@ -218,6 +219,13 @@ async def update_me(
     update_dict["facebook_link"]  = data.facebook_link.strip()[:500]
     update_dict["twitter_link"]   = data.twitter_link.strip()[:500]
     update_dict["youtube_link"]   = data.youtube_link.strip()[:500]
+
+    if data.picture:
+        pic = data.picture.strip()
+        if not pic.startswith("https://res.cloudinary.com/"):
+            raise HTTPException(status_code=400, detail="Invalid picture URL")
+        update_dict["picture"] = pic
+
     update_dict["updated_at"]     = datetime.now(timezone.utc)
 
     await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": update_dict})
