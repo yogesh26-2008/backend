@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
@@ -10,9 +11,82 @@ import logging
 from app.database import get_db
 from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
+from app.services.notification_service import send_like_push, is_fcm_ready
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background task — fire-and-forget like notification
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _send_like_notification(db, post_id: str, liker_id: str):
+    """Fetch all needed data and dispatch FCM + DB notification for a like."""
+    try:
+        post, liker = await asyncio.gather(
+            db.posts.find_one(
+                {"_id": ObjectId(post_id)},
+                {"user_id": 1},
+            ),
+            db.users.find_one(
+                {"_id": ObjectId(liker_id)},
+                {"name": 1, "username": 1},
+            ),
+        )
+
+        if not post or not liker:
+            return
+
+        owner_id = post.get("user_id", "")
+        if owner_id == liker_id:
+            return  # don't notify yourself
+
+        owner = await db.users.find_one(
+            {"_id": ObjectId(owner_id)},
+            {"fcm_token": 1, "notification_settings": 1},
+        )
+        if not owner:
+            return
+
+        liker_name     = liker.get("name", "")
+        liker_username = liker.get("username", "")
+        fcm_token      = owner.get("fcm_token")
+        _ns            = owner.get("notification_settings", {})
+        notif_master   = _ns.get("master", True)
+        notif_likes    = _ns.get("likes",  True)
+
+        notif_id = str(ObjectId())
+        now      = datetime.now(timezone.utc)
+
+        await db.notifications.insert_one({
+            "_id":           ObjectId(notif_id),
+            "recipient_id":  owner_id,
+            "type":          "like",
+            "from_user_id":  liker_id,
+            "from_username": liker_username,
+            "from_name":     liker_name,
+            "post_id":       post_id,
+            "text":          "liked your post",
+            "read":          False,
+            "created_at":    now,
+        })
+        logger.info(f"[LIKE] ✅ notification saved id={notif_id}")
+
+        if fcm_token and is_fcm_ready() and notif_master and notif_likes:
+            asyncio.create_task(
+                send_like_push(
+                    fcm_token=fcm_token,
+                    liker_name=liker_name,
+                    liker_username=liker_username,
+                    post_id=post_id,
+                    notif_id=notif_id,
+                )
+            )
+            logger.info(f"[LIKE] 📲 FCM task scheduled → owner={owner_id}")
+
+    except Exception as e:
+        logger.error(f"[LIKE] ❌ notification error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,6 +295,7 @@ async def like_post(
     )
     if res.upserted_id:
         await db.posts.update_one({"_id": oid}, {"$inc": {"likes_count": 1}})
+        asyncio.create_task(_send_like_notification(db, post_id, user_id))
     return {"liked": True}
 
 
