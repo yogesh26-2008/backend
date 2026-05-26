@@ -23,45 +23,51 @@ logger = logging.getLogger(__name__)
 
 async def _send_like_notification(db, post_id: str, liker_id: str):
     """Fetch all needed data and dispatch FCM + DB notification for a like."""
+    print(f"[LIKE] 🔔 _send_like_notification called — post={post_id} liker={liker_id}")
     try:
         post, liker = await asyncio.gather(
-            db.posts.find_one(
-                {"_id": ObjectId(post_id)},
-                {"user_id": 1},
-            ),
-            db.users.find_one(
-                {"_id": ObjectId(liker_id)},
-                {"name": 1, "username": 1},
-            ),
+            db.posts.find_one({"_id": ObjectId(post_id)}, {"user_id": 1}),
+            db.users.find_one({"_id": ObjectId(liker_id)}, {"name": 1, "username": 1}),
         )
 
-        if not post or not liker:
+        if not post:
+            print(f"[LIKE] ❌ post not found: {post_id}")
+            return
+        if not liker:
+            print(f"[LIKE] ❌ liker not found: {liker_id}")
             return
 
         owner_id = post.get("user_id", "")
-        if owner_id == liker_id:
-            return  # don't notify yourself
+        print(f"[LIKE] owner_id={owner_id}  liker_id={liker_id}")
+
+        if str(owner_id) == str(liker_id):
+            print(f"[LIKE] ⏭ self-like skipped")
+            return
 
         owner = await db.users.find_one(
-            {"_id": ObjectId(owner_id)},
+            {"_id": ObjectId(str(owner_id))},
             {"fcm_token": 1, "notification_settings": 1},
         )
         if not owner:
+            print(f"[LIKE] ❌ owner user not found: {owner_id}")
             return
 
-        liker_name     = liker.get("name", "")
-        liker_username = liker.get("username", "")
+        liker_name     = liker.get("name", "") or ""
+        liker_username = liker.get("username", "") or ""
         fcm_token      = owner.get("fcm_token")
-        _ns            = owner.get("notification_settings", {})
+        _ns            = owner.get("notification_settings") or {}
         notif_master   = _ns.get("master", True)
         notif_likes    = _ns.get("likes",  True)
+
+        print(f"[LIKE] liker={liker_username!r}  fcm={'✓' if fcm_token else '✗ MISSING'}  "
+              f"fcm_ready={is_fcm_ready()}  master={notif_master}  likes={notif_likes}")
 
         notif_id = str(ObjectId())
         now      = datetime.now(timezone.utc)
 
         await db.notifications.insert_one({
             "_id":           ObjectId(notif_id),
-            "recipient_id":  owner_id,
+            "recipient_id":  str(owner_id),
             "type":          "like",
             "from_user_id":  liker_id,
             "from_username": liker_username,
@@ -71,22 +77,32 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
             "read":          False,
             "created_at":    now,
         })
-        logger.info(f"[LIKE] ✅ notification saved id={notif_id}")
+        print(f"[LIKE] ✅ notification saved id={notif_id}")
 
-        if fcm_token and is_fcm_ready() and notif_master and notif_likes:
-            asyncio.create_task(
-                send_like_push(
-                    fcm_token=fcm_token,
-                    liker_name=liker_name,
-                    liker_username=liker_username,
-                    post_id=post_id,
-                    notif_id=notif_id,
-                )
+        if not fcm_token:
+            print(f"[LIKE] ⚠️  owner has no FCM token — push skipped")
+            return
+        if not is_fcm_ready():
+            print(f"[LIKE] ⚠️  Firebase not initialized — push skipped")
+            return
+        if not notif_master or not notif_likes:
+            print(f"[LIKE] ⚠️  notifications disabled by owner — push skipped")
+            return
+
+        asyncio.create_task(
+            send_like_push(
+                fcm_token=fcm_token,
+                liker_name=liker_name,
+                liker_username=liker_username,
+                post_id=post_id,
+                notif_id=notif_id,
             )
-            logger.info(f"[LIKE] 📲 FCM task scheduled → owner={owner_id}")
+        )
+        print(f"[LIKE] 📲 FCM task scheduled → owner={owner_id}")
 
     except Exception as e:
-        logger.error(f"[LIKE] ❌ notification error: {e}")
+        import traceback
+        print(f"[LIKE] ❌ notification error: {e}\n{traceback.format_exc()}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
