@@ -145,6 +145,57 @@ async def create_post(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /posts/shots/ — Shots feed filtered by section ("fun" | "learn")
+# Must be declared BEFORE /{post_id}/like to avoid path-param collision
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/shots/")
+async def get_shots_feed(
+    section: str           = Query(..., description="'fun' or 'learn'"),
+    cursor:  Optional[str] = Query(None),
+    limit:   int           = Query(10, ge=1, le=20),
+    user_id: str           = Depends(get_current_user_id),
+    db                     = Depends(get_db),
+):
+    if section not in ("fun", "learn"):
+        raise HTTPException(status_code=400, detail="section must be 'fun' or 'learn'")
+
+    query: dict = {"media_type": "video", "section": section}
+    if cursor:
+        try:
+            query["_id"] = {"$lt": ObjectId(cursor)}
+        except Exception:
+            pass
+
+    posts = (
+        await db.posts.find(query, projection={
+            "_id": 1, "user_id": 1, "user_name": 1, "user_username": 1,
+            "user_picture": 1, "media_url": 1, "thumbnail_url": 1, "public_id": 1,
+            "media_type": 1, "caption": 1, "aspect_ratio": 1, "section": 1,
+            "likes_count": 1, "comments_count": 1, "created_at": 1,
+        })
+        .sort("_id", -1)
+        .limit(limit)
+        .to_list(length=limit)
+    )
+
+    if not posts:
+        return {"posts": [], "next_cursor": None}
+
+    post_ids = [str(p["_id"]) for p in posts]
+    likes = await db.post_likes.find(
+        {"user_id": user_id, "post_id": {"$in": post_ids}},
+        {"post_id": 1, "_id": 0},
+    ).to_list(length=len(post_ids))
+    liked_ids = {l["post_id"] for l in likes}
+
+    return {
+        "posts":       [_serialize(p, liked_ids) for p in posts],
+        "next_cursor": str(posts[-1]["_id"]) if len(posts) == limit else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # POST /posts/{id}/like  &  DELETE /posts/{id}/like — Toggle like
 # ─────────────────────────────────────────────────────────────────────────────
 
