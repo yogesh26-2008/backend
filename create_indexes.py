@@ -81,6 +81,42 @@ async def create_indexes():
     )
     print("✅ users: text index (username, name)")
 
+    # ── posts ─────────────────────────────────────────────────
+    # General feed query (all posts newest first)
+    await db.posts.create_index(
+        [("_id", -1)],
+        name="posts_by_id_desc"
+    )
+    print("✅ posts: (_id DESC) — general feed")
+
+    # Shots feed query: filter by media_type + section, newest first
+    await db.posts.create_index(
+        [("media_type", 1), ("section", 1), ("_id", -1)],
+        name="posts_shots_feed"
+    )
+    print("✅ posts: (media_type, section, _id DESC) — shots feed")
+
+    # User posts query (profile screen)
+    await db.posts.create_index(
+        [("user_id", 1), ("_id", -1)],
+        name="posts_by_user"
+    )
+    print("✅ posts: (user_id, _id DESC) — user profile feed")
+
+    # Post likes — check if user liked a post
+    await db.post_likes.create_index(
+        [("post_id", 1), ("user_id", 1)],
+        unique=True,
+        name="post_likes_unique"
+    )
+    print("✅ post_likes: (post_id, user_id) unique")
+
+    await db.post_likes.create_index(
+        [("user_id", 1), ("post_id", 1)],
+        name="post_likes_by_user"
+    )
+    print("✅ post_likes: (user_id, post_id)")
+
     print("\n🎉 All indexes created successfully!")
     client.close()
 
