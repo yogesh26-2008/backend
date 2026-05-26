@@ -374,3 +374,35 @@ async def get_user_posts(
         "posts":       [_serialize(p, liked_ids) for p in posts],
         "next_cursor": str(posts[-1]["_id"]) if len(posts) == limit else None,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELETE /posts/{post_id} — Delete own post (owner only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.delete("/{post_id}")
+async def delete_post(
+    post_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db          = Depends(get_db),
+):
+    try:
+        oid = ObjectId(post_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid post ID")
+
+    post = await db.posts.find_one({"_id": oid}, {"user_id": 1})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    if post.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="You can only delete your own posts")
+
+    await db.posts.delete_one({"_id": oid})
+    await asyncio.gather(
+        db.post_likes.delete_many({"post_id": post_id}),
+        db.notifications.delete_many({"post_id": post_id}),
+    )
+
+    logger.info(f"[POST] deleted id={post_id} user={user_id}")
+    return {"deleted": True}
