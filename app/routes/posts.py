@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
@@ -10,9 +11,98 @@ import logging
 from app.database import get_db
 from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
+from app.services.notification_service import send_like_push, is_fcm_ready
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background task — fire-and-forget like notification
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _send_like_notification(db, post_id: str, liker_id: str):
+    """Fetch all needed data and dispatch FCM + DB notification for a like."""
+    print(f"[LIKE] 🔔 _send_like_notification called — post={post_id} liker={liker_id}")
+    try:
+        post, liker = await asyncio.gather(
+            db.posts.find_one({"_id": ObjectId(post_id)}, {"user_id": 1}),
+            db.users.find_one({"_id": ObjectId(liker_id)}, {"name": 1, "username": 1}),
+        )
+
+        if not post:
+            print(f"[LIKE] ❌ post not found: {post_id}")
+            return
+        if not liker:
+            print(f"[LIKE] ❌ liker not found: {liker_id}")
+            return
+
+        owner_id = post.get("user_id", "")
+        print(f"[LIKE] owner_id={owner_id}  liker_id={liker_id}")
+
+        if str(owner_id) == str(liker_id):
+            print(f"[LIKE] ⏭ self-like skipped")
+            return
+
+        owner = await db.users.find_one(
+            {"_id": ObjectId(str(owner_id))},
+            {"fcm_token": 1, "notification_settings": 1},
+        )
+        if not owner:
+            print(f"[LIKE] ❌ owner user not found: {owner_id}")
+            return
+
+        liker_name     = liker.get("name", "") or ""
+        liker_username = liker.get("username", "") or ""
+        fcm_token      = owner.get("fcm_token")
+        _ns            = owner.get("notification_settings") or {}
+        notif_master   = _ns.get("master", True)
+        notif_likes    = _ns.get("likes",  True)
+
+        print(f"[LIKE] liker={liker_username!r}  fcm={'✓' if fcm_token else '✗ MISSING'}  "
+              f"fcm_ready={is_fcm_ready()}  master={notif_master}  likes={notif_likes}")
+
+        notif_id = str(ObjectId())
+        now      = datetime.now(timezone.utc)
+
+        await db.notifications.insert_one({
+            "_id":           ObjectId(notif_id),
+            "recipient_id":  str(owner_id),
+            "type":          "like",
+            "from_user_id":  liker_id,
+            "from_username": liker_username,
+            "from_name":     liker_name,
+            "post_id":       post_id,
+            "text":          "liked your post",
+            "read":          False,
+            "created_at":    now,
+        })
+        print(f"[LIKE] ✅ notification saved id={notif_id}")
+
+        if not fcm_token:
+            print(f"[LIKE] ⚠️  owner has no FCM token — push skipped")
+            return
+        if not is_fcm_ready():
+            print(f"[LIKE] ⚠️  Firebase not initialized — push skipped")
+            return
+        if not notif_master or not notif_likes:
+            print(f"[LIKE] ⚠️  notifications disabled by owner — push skipped")
+            return
+
+        asyncio.create_task(
+            send_like_push(
+                fcm_token=fcm_token,
+                liker_name=liker_name,
+                liker_username=liker_username,
+                post_id=post_id,
+                notif_id=notif_id,
+            )
+        )
+        print(f"[LIKE] 📲 FCM task scheduled → owner={owner_id}")
+
+    except Exception as e:
+        import traceback
+        print(f"[LIKE] ❌ notification error: {e}\n{traceback.format_exc()}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,6 +311,7 @@ async def like_post(
     )
     if res.upserted_id:
         await db.posts.update_one({"_id": oid}, {"$inc": {"likes_count": 1}})
+        asyncio.create_task(_send_like_notification(db, post_id, user_id))
     return {"liked": True}
 
 

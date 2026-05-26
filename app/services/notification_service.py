@@ -170,6 +170,57 @@ async def send_message_push(
     await _dispatch(msg, label=f"msg→{sender_username}")
 
 
+async def send_like_push(
+    fcm_token: str,
+    liker_name: str,
+    liker_username: str,
+    post_id: str,
+    notif_id: str = "",
+):
+    """Send FCM push when someone likes a post."""
+    title = liker_name or liker_username
+    body  = "liked your post ❤️"
+
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        android=messaging.AndroidConfig(
+            priority="high",
+            ttl=3600,
+            notification=messaging.AndroidNotification(
+                title=title,
+                body=body,
+                channel_id="trandia_v4",
+                color="#FF4444",
+                tag=f"like_{post_id}",
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10", "apns-push-type": "alert"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title=title,
+                        subtitle="New like",
+                        body=body,
+                    ),
+                    badge=1,
+                    sound="default",
+                )
+            ),
+        ),
+        data={
+            "type":     "like",
+            "id":       notif_id,
+            "post_id":  post_id,
+            "username": liker_username,
+            "title":    title,
+            "body":     body,
+        },
+        token=fcm_token,
+    )
+    await _dispatch(msg, label=f"like→{liker_username}")
+
+
 async def send_welcome_push(fcm_token: str, name: str, is_signup: bool):
     """Send welcome push ~2s after login/signup."""
     await asyncio.sleep(2)
