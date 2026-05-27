@@ -68,17 +68,28 @@ async def _create_indexes():
             [("created_at", DESCENDING)], background=True, name="posts_global_feed"
         )
 
-        # ── Stories — TTL: auto-delete after 24 h ────────────────────────────
+        # ── Stories ───────────────────────────────────────────────────────────
+        # Variable TTL: expires_at is set to created_at + chosen duration (6/12/24h).
+        # MongoDB deletes the doc when expires_at is reached (expireAfterSeconds=0).
+        try:
+            await _db.stories.drop_index("stories_ttl_24h")
+        except Exception:
+            pass
         await _db.stories.create_index(
-            [("created_at", ASCENDING)],
-            expireAfterSeconds=86400,
+            [("expires_at", ASCENDING)],
+            expireAfterSeconds=0,
             background=True,
-            name="stories_ttl_24h",
+            name="stories_ttl_expires",
         )
         await _db.stories.create_index(
             [("user_id", ASCENDING), ("created_at", DESCENDING)],
             background=True,
             name="stories_user_feed",
+        )
+        await _db.stories.create_index(
+            [("hidden_from", ASCENDING)],
+            background=True,
+            name="stories_hidden_from",
         )
 
         # ── Conversations ─────────────────────────────────────────────────────

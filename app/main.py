@@ -19,6 +19,7 @@ from app.services.media_service import init_media_provider
 from app.routes import auth, users, posts, chat, notifications
 from app.routes import media as media_router
 from app.routes import agora as agora_router
+from app.routes import stories as stories_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -306,6 +307,7 @@ app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 app.include_router(media_router.router, prefix="/media", tags=["Media"])
 app.include_router(agora_router.router, prefix="/agora", tags=["Agora"])
+app.include_router(stories_router.router, prefix="/stories", tags=["Stories"])
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
