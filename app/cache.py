@@ -45,3 +45,19 @@ async def set_cache(key: str, value: dict, expire_seconds: int = 300):
     if not _redis_client:
         return
     await _redis_client.set(key, json.dumps(value), ex=expire_seconds)
+
+
+async def delete_cache(key: str) -> None:
+    """Delete a single cache entry."""
+    if not _redis_client:
+        return
+    await _redis_client.delete(key)
+
+
+async def delete_cache_pattern(pattern: str) -> None:
+    """Delete all cache keys matching a glob pattern, e.g. 'feed:u:abc123:*'."""
+    if not _redis_client:
+        return
+    keys = await _redis_client.keys(pattern)
+    if keys:
+        await _redis_client.delete(*keys)

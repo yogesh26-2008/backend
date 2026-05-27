@@ -12,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
 from app.database import connect_db, close_db
+from app.cache import init_redis, close_redis
 from app.limiter import limiter
 from app.services.notification_service import init_firebase
 from app.services.media_service import init_media_provider
@@ -227,7 +228,15 @@ async def lifespan(app: FastAPI):
             print("[STARTUP] Cloudinary not configured — set CLOUDINARY_* vars in .env")
     except Exception as e:
         print(f"[STARTUP] Media provider init error: {e}")
+    try:
+        if settings.redis_url:
+            await init_redis(settings.redis_url)
+        else:
+            print("[STARTUP] REDIS_URL not set — caching disabled (set in Railway env vars)")
+    except Exception as e:
+        print(f"[STARTUP] Redis init error: {e}")
     yield
+    await close_redis()
     await close_db()
 
 
