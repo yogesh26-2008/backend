@@ -26,14 +26,7 @@ router = APIRouter()
 
 
 def _parse_client_created_at(value) -> Optional[datetime]:
-    """
-    NOTE: Hum client time ko IGNORE karte hain aur server UTC time use karte hain.
-    Iska karan: client ka clock galat ho sakta hai ya timezone mismatch ho sakti hai
-    jisse dono users ko alag-alag time dikh sakta tha.
-    Server hamesha accurate UTC time use karta hai.
-    """
-    return None  # Always use server time (datetime.now(timezone.utc) in save_message)
-
+    return None  # Always use server time
 
 
 @router.get("/conversations", response_model=List[ConversationResponse])
@@ -41,7 +34,6 @@ async def list_conversations(
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    """Get all conversations for the current user, sorted by last message."""
     return await get_user_conversations(user_id, db)
 
 
@@ -51,7 +43,6 @@ async def start_conversation(
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    """Get or create a 1-on-1 conversation."""
     try:
         conv_id = await get_or_create_conversation(user_id, data.participant_username, db)
         return {"conversation_id": conv_id}
@@ -67,7 +58,6 @@ async def get_messages(
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    """Get messages for a conversation (newest first)."""
     try:
         oid = ObjectId(conversation_id)
     except InvalidId:
@@ -89,7 +79,6 @@ async def react_to_message(
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    """Toggle a reaction emoji on a message (REST fallback)."""
     emoji = body.get("emoji", "").strip()
     if not emoji:
         raise HTTPException(status_code=400, detail="emoji is required")
@@ -122,7 +111,6 @@ async def delete_message(
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    """Delete a message (only sender can delete)."""
     try:
         msg_oid = ObjectId(message_id)
     except InvalidId:
@@ -146,7 +134,6 @@ async def delete_conversation(
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    """Delete a conversation and all its messages."""
     try:
         oid = ObjectId(conversation_id)
     except InvalidId:
@@ -162,7 +149,7 @@ async def delete_conversation(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FCM push helper — sends to offline recipients only
+# FCM push helper
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _push_to_eligible_recipients(
@@ -172,16 +159,6 @@ async def _push_to_eligible_recipients(
     participant_ids: List[str],
     db,
 ):
-    """
-    For every participant who is NOT the sender, fetch their FCM token
-    and fire a push notification.
-
-    We push to ALL participants (online and offline) because:
-    - If the user has the app open but is on a different screen, they
-      SHOULD get a heads-up banner.
-    - The Flutter FCM foreground listener suppresses the notification
-      automatically when the user is actively viewing that conversation.
-    """
     eligible_ids = [pid for pid in participant_ids if pid != sender_id]
     if not eligible_ids:
         return
@@ -214,16 +191,24 @@ async def _push_to_eligible_recipients(
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WebSocket
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     """
-    Real-time chat WebSocket.
-    Client sends JSON:
-      {"type": "message",  "conversation_id": "...", "text": "...",
-       "reply_to_id": "...", "reply_to_text": "..."}
-      {"type": "typing",   "conversation_id": "..."}
-      {"type": "read",     "conversation_id": "..."}
-      {"type": "react",    "conversation_id": "...", "message_id": "...", "emoji": "❤️"}
+    Real-time WebSocket — handles chat + call signaling.
+
+    Message types (client → server):
+      message     : send chat message
+      typing      : typing indicator
+      read        : mark conversation read
+      react       : toggle emoji reaction
+      call_invite : initiate a call  {callee_id, call_type, channel_name, caller_name}
+      call_accept : callee accepts   {target_id, channel_name}
+      call_reject : callee rejects   {target_id, channel_name}
+      call_end    : end active call  {target_id, channel_name}
     """
     payload = decode_token(token)
     if not payload:
@@ -234,7 +219,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     await manager.connect(websocket, user_id)
     logger.info(f"[WS] User {user_id} connected")
 
-    # Fetch sender profile once per connection (username for notifications)
     db = get_db()
     sender_doc = await db.users.find_one({"_id": ObjectId(user_id)}, {"username": 1})
     sender_username: str = (sender_doc or {}).get("username", "Someone")
@@ -243,9 +227,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         while True:
             raw = await websocket.receive_text()
             try:
-                data        = json.loads(raw)
-                event_type  = data.get("type")
-                conv_id     = data.get("conversation_id", "")
+                data       = json.loads(raw)
+                event_type = data.get("type")
+                conv_id    = data.get("conversation_id", "")
 
                 # ── Send message ──────────────────────────────
                 if event_type == "message":
@@ -262,10 +246,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
                     try:
                         msg_res, participants = await save_message(
-                            conv_id,
-                            user_id,
-                            text,
-                            db,
+                            conv_id, user_id, text, db,
                             encrypted_aes_keys=encrypted_aes_keys,
                             created_at=client_created_at,
                             reply_to_id=reply_to_id,
@@ -275,7 +256,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         logger.warning(f"[WS] save_message error: {e}")
                         continue
 
-                    # 1️⃣  Deliver over WebSocket to all online participants
                     broadcast = json.dumps({
                         "type":    "message",
                         "message": msg_res.model_dump(mode="json"),
@@ -283,7 +263,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     for pid in participants:
                         await manager.send_personal_message(broadcast, pid)
 
-                    # 2️⃣  Push FCM to eligible participants (fire & forget)
                     asyncio.create_task(
                         _push_to_eligible_recipients(
                             sender_id=user_id,
@@ -353,6 +332,50 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     })
                     for pid in conv["participants"]:
                         await manager.send_personal_message(broadcast, pid)
+
+                # ── Call signaling ────────────────────────────
+                # call_invite: caller → callee
+                elif event_type == "call_invite":
+                    callee_id    = (data.get("callee_id") or "").strip()
+                    call_type    = data.get("call_type", "voice")
+                    channel_name = (data.get("channel_name") or "").strip()
+                    caller_name  = (data.get("caller_name") or sender_username).strip()
+
+                    if not callee_id or not channel_name:
+                        continue
+                    if call_type not in ("voice", "video"):
+                        continue
+                    # Security: caller's user_id must be part of the channel name
+                    if user_id not in channel_name:
+                        logger.warning(f"[WS] call_invite security fail: {user_id} not in {channel_name}")
+                        continue
+
+                    await manager.send_personal_message(json.dumps({
+                        "type":         "call_invite",
+                        "call_type":    call_type,
+                        "channel_name": channel_name,
+                        "caller_id":    user_id,
+                        "caller_name":  caller_name,
+                    }), callee_id)
+                    logger.info(f"[WS] call_invite {user_id} → {callee_id} ({call_type})")
+
+                # call_accept / call_reject / call_end: point-to-point forward
+                elif event_type in ("call_accept", "call_reject", "call_end"):
+                    target_id    = (data.get("target_id") or "").strip()
+                    channel_name = (data.get("channel_name") or "").strip()
+
+                    if not target_id or not channel_name:
+                        continue
+                    if user_id not in channel_name:
+                        logger.warning(f"[WS] {event_type} security fail: {user_id} not in {channel_name}")
+                        continue
+
+                    await manager.send_personal_message(json.dumps({
+                        "type":         event_type,
+                        "channel_name": channel_name,
+                        "from_id":      user_id,
+                    }), target_id)
+                    logger.info(f"[WS] {event_type} {user_id} → {target_id}")
 
             except json.JSONDecodeError:
                 logger.debug(f"[WS] Non-JSON message from {user_id}")

@@ -432,6 +432,31 @@ async def get_user_posts(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /posts/{post_id} — Fetch a single post
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{post_id}")
+async def get_post(
+    post_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db           = Depends(get_db),
+):
+    try:
+        oid = ObjectId(post_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid post ID")
+
+    post = await db.posts.find_one({"_id": oid})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    likes = await db.post_likes.find_one({"user_id": user_id, "post_id": post_id})
+    liked_ids = {post_id} if likes else set()
+
+    return _serialize(post, liked_ids)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DELETE /posts/{post_id} — Delete own post (owner only)
 # ─────────────────────────────────────────────────────────────────────────────
 
