@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     cloudinary_api_key: str = ""
     cloudinary_api_secret: str = ""
 
+    # ── Agora RTC (Voice & Video Calls) ──────────────────────────────────────
+    agora_app_id: str = "4acf66a0e7e246fe80064783ec2bb879"
+    agora_app_certificate: str = ""   # Set in .env / Railway env vars
+
     redis_url: str = Field(
         default="",
         description="Redis connection URL, e.g. redis://localhost:6379 or rediss://... for TLS",
