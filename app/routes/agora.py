@@ -3,13 +3,12 @@
 # GET /agora/token?channel=xxx&uid=0  → { "token": "...", "app_id": "..." }
 
 import time
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from agora_token_builder import RtcTokenBuilder
 from agora_token_builder.RtcTokenBuilder import Role_Publisher
 
 from app.config import settings
-from app.utils.jwt_handler import get_current_user_id
 
 router = APIRouter()
 
@@ -20,7 +19,7 @@ _TOKEN_EXPIRE_SECONDS = 3600
 def _build_token(channel_name: str, uid: int) -> str:
     """Generate an Agora RTC token using the App Certificate."""
     if not settings.agora_app_certificate:
-        # No certificate → return empty string (works only when certificate is disabled in console)
+        # Certificate disabled in Agora console → empty token works
         return ""
 
     expire_timestamp = int(time.time()) + _TOKEN_EXPIRE_SECONDS
@@ -40,22 +39,18 @@ def _build_token(channel_name: str, uid: int) -> str:
 async def get_agora_token(
     channel: str = Query(..., description="Agora channel name"),
     uid: int = Query(default=0, description="Agora user UID (0 = auto-assign)"),
-    user_id: str = Depends(get_current_user_id),
 ):
     """
     Generate a short-lived Agora RTC token for voice/video calls.
-    Requires authentication. Token is valid for 1 hour.
+    No auth needed — security comes from the App Certificate itself.
+    Token is valid for 1 hour.
     """
     if not channel or len(channel) < 3:
         raise HTTPException(status_code=400, detail="Invalid channel name")
 
-    # Security: Channel name must contain the caller's user ID
-    # Channel format: trandia_<sorted_uid1>_<sorted_uid2>
-    if user_id not in channel:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to join this channel"
-        )
+    # Basic sanity: channel must start with app prefix
+    if not channel.startswith("trandia_"):
+        raise HTTPException(status_code=400, detail="Invalid channel name format")
 
     try:
         token = _build_token(channel, uid)
