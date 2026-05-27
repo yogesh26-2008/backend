@@ -12,6 +12,12 @@ from app.database import get_db
 from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
 from app.services.notification_service import send_like_push, is_fcm_ready
+from app.cache import get_cache, set_cache, delete_cache, delete_cache_pattern
+from app.utils.cloudinary_transform import optimize_image, optimize_thumbnail, optimize_video
+
+# TTL constants (seconds)
+_FEED_TTL   = 90   # home feed first page
+_SHOTS_TTL  = 90   # shots first page per section
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -110,16 +116,29 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _serialize(post: dict, liked_ids: set) -> dict:
+    media_type = post.get("media_type", "image")
+    raw_media  = post.get("media_url", "")
+    raw_thumb  = post.get("thumbnail_url")
+    raw_pic    = post.get("user_picture")
+
+    # Serve optimized URLs — clients get smaller files automatically
+    if media_type == "video":
+        media_url     = optimize_video(raw_media)
+        thumbnail_url = optimize_thumbnail(raw_thumb) if raw_thumb else None
+    else:
+        media_url     = optimize_image(raw_media, width=720)
+        thumbnail_url = optimize_thumbnail(raw_thumb) if raw_thumb else None
+
     return {
         "id":             str(post["_id"]),
         "user_id":        post.get("user_id", ""),
         "user_name":      post.get("user_name", ""),
         "user_username":  post.get("user_username", ""),
-        "user_picture":   post.get("user_picture"),
-        "media_url":      post.get("media_url", ""),
-        "thumbnail_url":  post.get("thumbnail_url"),
+        "user_picture":   optimize_image(raw_pic, width=200) if raw_pic else None,
+        "media_url":      media_url,
+        "thumbnail_url":  thumbnail_url,
         "public_id":      post.get("public_id", ""),
-        "media_type":     post.get("media_type", "image"),
+        "media_type":     media_type,
         "caption":        post.get("caption", ""),
         "aspect_ratio":   post.get("aspect_ratio", 1.0),
         "section":        post.get("section"),
@@ -141,6 +160,13 @@ async def get_posts(
     user_id: str          = Depends(get_current_user_id),
     db                    = Depends(get_db),
 ):
+    # ── Redis cache for first page only (cursor-less requests) ───────────────
+    cache_key = f"feed:u:{user_id}:page1:l{limit}" if not cursor else None
+    if cache_key:
+        cached = await get_cache(cache_key)
+        if cached:
+            return cached
+
     query: dict = {}
     if cursor:
         try:
@@ -161,7 +187,10 @@ async def get_posts(
     )
 
     if not posts:
-        return {"posts": [], "next_cursor": None}
+        empty = {"posts": [], "next_cursor": None}
+        if cache_key:
+            await set_cache(cache_key, empty, expire_seconds=30)
+        return empty
 
     post_ids = [str(p["_id"]) for p in posts]
     likes = await db.post_likes.find(
@@ -170,10 +199,15 @@ async def get_posts(
     ).to_list(length=len(post_ids))
     liked_ids = {l["post_id"] for l in likes}
 
-    return {
+    result = {
         "posts":       [_serialize(p, liked_ids) for p in posts],
         "next_cursor": str(posts[-1]["_id"]) if len(posts) == limit else None,
     }
+
+    if cache_key:
+        await set_cache(cache_key, result, expire_seconds=_FEED_TTL)
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -231,6 +265,12 @@ async def create_post(
     result = await db.posts.insert_one(doc)
     doc["_id"] = result.inserted_id
     logger.info(f"[POST] created id={result.inserted_id} user={user_id}")
+
+    # Invalidate this user's first-page feed cache so new post appears immediately
+    await delete_cache_pattern(f"feed:u:{user_id}:*")
+    if body.section:
+        await delete_cache_pattern(f"shots:u:{user_id}:{body.section}:*")
+
     return _serialize(doc, set())
 
 
@@ -249,6 +289,13 @@ async def get_shots_feed(
 ):
     if section not in ("fun", "learn"):
         raise HTTPException(status_code=400, detail="section must be 'fun' or 'learn'")
+
+    # ── Redis cache for first page only ──────────────────────────────────────
+    cache_key = f"shots:u:{user_id}:{section}:page1:l{limit}" if not cursor else None
+    if cache_key:
+        cached = await get_cache(cache_key)
+        if cached:
+            return cached
 
     query: dict = {"media_type": "video", "section": section}
     if cursor:
@@ -270,7 +317,10 @@ async def get_shots_feed(
     )
 
     if not posts:
-        return {"posts": [], "next_cursor": None}
+        empty = {"posts": [], "next_cursor": None}
+        if cache_key:
+            await set_cache(cache_key, empty, expire_seconds=30)
+        return empty
 
     post_ids = [str(p["_id"]) for p in posts]
     likes = await db.post_likes.find(
@@ -279,10 +329,15 @@ async def get_shots_feed(
     ).to_list(length=len(post_ids))
     liked_ids = {l["post_id"] for l in likes}
 
-    return {
+    result = {
         "posts":       [_serialize(p, liked_ids) for p in posts],
         "next_cursor": str(posts[-1]["_id"]) if len(posts) == limit else None,
     }
+
+    if cache_key:
+        await set_cache(cache_key, result, expire_seconds=_SHOTS_TTL)
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -398,11 +453,17 @@ async def delete_post(
     if post.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="You can only delete your own posts")
 
+    section = post.get("section")
     await db.posts.delete_one({"_id": oid})
     await asyncio.gather(
         db.post_likes.delete_many({"post_id": post_id}),
         db.notifications.delete_many({"post_id": post_id}),
     )
+
+    # Invalidate feed cache for this user
+    await delete_cache_pattern(f"feed:u:{user_id}:*")
+    if section:
+        await delete_cache_pattern(f"shots:u:{user_id}:{section}:*")
 
     logger.info(f"[POST] deleted id={post_id} user={user_id}")
     return {"deleted": True}

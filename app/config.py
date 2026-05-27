@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     cloudinary_api_key: str = ""
     cloudinary_api_secret: str = ""
 
+    redis_url: str = Field(
+        default="",
+        description="Redis connection URL, e.g. redis://localhost:6379 or rediss://... for TLS",
+    )
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @field_validator("app_secret_key")
