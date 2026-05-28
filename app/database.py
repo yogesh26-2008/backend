@@ -112,6 +112,14 @@ async def _create_indexes():
         )
 
         # ── Notifications ─────────────────────────────────────────────────────
+        # Primary query: find({recipient_id}).sort(created_at, -1)
+        # This index lets MongoDB skip the in-memory sort entirely.
+        await _db.notifications.create_index(
+            [("recipient_id", ASCENDING), ("created_at", DESCENDING)],
+            background=True,
+            name="notifications_by_time",
+        )
+        # Secondary index for unread-count queries (read filter + sort).
         await _db.notifications.create_index(
             [("recipient_id", ASCENDING), ("read", ASCENDING), ("created_at", DESCENDING)],
             background=True,
