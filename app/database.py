@@ -145,6 +145,14 @@ async def _create_indexes():
             name="refresh_tokens_ttl",
         )
 
+        # ── Share links ───────────────────────────────────────────────────────
+        await _db.share_links.create_index(
+            [("token", ASCENDING)], unique=True, background=True, name="share_links_token"
+        )
+        await _db.share_links.create_index(
+            [("videoId", ASCENDING)], background=True, name="share_links_video"
+        )
+
         print("[DB] ✅ All indexes verified.")
     except Exception as e:
         print(f"[DB] ⚠️  Index creation warning: {e}")
