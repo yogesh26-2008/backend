@@ -619,33 +619,37 @@ async def get_follow_status(
 @router.get("/{user_id}/followers")
 async def get_followers(
     user_id: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
     current_user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    # Find all follow relations where target is user_id
-    relations = await db.follows.find({"following_id": user_id}).to_list(length=500)
+    # Find paginated follow relations where target is user_id
+    relations = await db.follows.find(
+        {"following_id": user_id}
+    ).skip(skip).limit(limit).to_list(length=limit)
     follower_ids = [r["follower_id"] for r in relations]
-    
+
     if not follower_ids:
         return []
-        
+
     follower_oids = []
     for fid in follower_ids:
         try:
             follower_oids.append(ObjectId(fid))
         except Exception:
             continue
-            
-    users = await db.users.find({"_id": {"$in": follower_oids}}).to_list(length=500)
-    
+
+    users = await db.users.find({"_id": {"$in": follower_oids}}).to_list(length=limit)
+
     # Check which of these followers the current user is following
     target_ids = [str(u["_id"]) for u in users]
     following_docs = await db.follows.find(
         {"follower_id": current_user_id, "following_id": {"$in": target_ids}},
         {"following_id": 1, "_id": 0},
-    ).to_list(length=500)
+    ).to_list(length=limit)
     following_set = {doc["following_id"] for doc in following_docs}
-    
+
     return [
         {
             "id":          str(u["_id"]),
@@ -662,33 +666,37 @@ async def get_followers(
 @router.get("/{user_id}/following")
 async def get_following(
     user_id: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
     current_user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    # Find all follow relations where follower is user_id
-    relations = await db.follows.find({"follower_id": user_id}).to_list(length=500)
+    # Find paginated follow relations where follower is user_id
+    relations = await db.follows.find(
+        {"follower_id": user_id}
+    ).skip(skip).limit(limit).to_list(length=limit)
     following_ids = [r["following_id"] for r in relations]
-    
+
     if not following_ids:
         return []
-        
+
     following_oids = []
     for fid in following_ids:
         try:
             following_oids.append(ObjectId(fid))
         except Exception:
             continue
-            
-    users = await db.users.find({"_id": {"$in": following_oids}}).to_list(length=500)
-    
+
+    users = await db.users.find({"_id": {"$in": following_oids}}).to_list(length=limit)
+
     # Check which of these users the current user is following
     target_ids = [str(u["_id"]) for u in users]
     following_docs = await db.follows.find(
         {"follower_id": current_user_id, "following_id": {"$in": target_ids}},
         {"following_id": 1, "_id": 0},
-    ).to_list(length=500)
+    ).to_list(length=limit)
     following_set = {doc["following_id"] for doc in following_docs}
-    
+
     return [
         {
             "id":          str(u["_id"]),
