@@ -317,7 +317,11 @@ async def trigger_quiz_generation(db: AsyncIOMotorDatabase, user_id: str, quiz_p
 # Watch Event Handler
 # ─────────────────────────────────────────────────────────────────────────────
 
-QUIZ_TRIGGER_COUNT = 8
+QUIZ_TRIGGER_COUNT = 5       # TEST: 5 reels → trigger (production: 50)
+POOL_THRESHOLD_PCT  = 5       # TEST: 5% watch → pool entry (production: 65)
+COUNT_THRESHOLD_PCT = 5       # TEST: 5% watch → count++  (production: 35)
+MIN_WATCH_SECONDS   = 1       # TEST: 1s minimum           (production: 15)
+POOL_MIN_SIZE       = 5       # how many videos needed in pool before quiz
 
 
 async def handle_watch_event(
@@ -329,7 +333,7 @@ async def handle_watch_event(
     video_topic: str,
     video_url: str,
 ) -> dict:
-    if watch_duration_seconds < 3:
+    if watch_duration_seconds < MIN_WATCH_SECONDS:
         user = await db.users.find_one({"_id": ObjectId(user_id)}, {"learn_view_count": 1})
         return {"count": user.get("learn_view_count", 0) if user else 0, "quiz_triggered": False}
 
@@ -342,12 +346,12 @@ async def handle_watch_event(
     learn_count = user.get("learn_view_count", 0)
     updates: dict = {}
 
-    if watch_percentage >= 35 and video_id not in viewed_ids:
+    if watch_percentage >= COUNT_THRESHOLD_PCT and video_id not in viewed_ids:
         updates["$inc"] = {"learn_view_count": 1}
         updates["$push"] = {"viewed_video_ids": video_id}
         learn_count += 1
 
-    if watch_percentage >= 65:
+    if watch_percentage >= POOL_THRESHOLD_PCT:
         already_in_pool = any(v["video_id"] == video_id for v in quiz_pool)
         if not already_in_pool:
             entry = {
@@ -365,7 +369,7 @@ async def handle_watch_event(
     if updates:
         await db.users.update_one({"_id": ObjectId(user_id)}, updates)
 
-    if learn_count >= QUIZ_TRIGGER_COUNT and len(quiz_pool) >= 5:
+    if learn_count >= QUIZ_TRIGGER_COUNT and len(quiz_pool) >= POOL_MIN_SIZE:
         last_pattern = user.get("last_quiz_pattern", "B")
         quiz_id = await trigger_quiz_generation(db, user_id, quiz_pool, last_pattern)
         await db.users.update_one(
