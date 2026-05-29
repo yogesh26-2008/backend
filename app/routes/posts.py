@@ -457,6 +457,55 @@ async def get_post(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /posts/{post_id}/likers — Users who liked a post
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{post_id}/likers")
+async def get_post_likers(
+    post_id: str,
+    skip:    int = Query(0, ge=0),
+    limit:   int = Query(30, ge=1, le=50),
+    user_id: str = Depends(get_current_user_id),
+    db           = Depends(get_db),
+):
+    try:
+        ObjectId(post_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid post ID")
+
+    like_docs = await db.post_likes.find(
+        {"post_id": post_id},
+        {"user_id": 1, "_id": 0},
+    ).skip(skip).limit(limit).to_list(length=limit)
+
+    if not like_docs:
+        return []
+
+    liker_ids = [d["user_id"] for d in like_docs]
+    users = await db.users.find(
+        {"_id": {"$in": [ObjectId(uid) for uid in liker_ids]}},
+        {"name": 1, "username": 1, "picture": 1},
+    ).to_list(length=limit)
+
+    following_docs = await db.follows.find(
+        {"follower_id": user_id, "following_id": {"$in": liker_ids}},
+        {"following_id": 1, "_id": 0},
+    ).to_list(length=limit)
+    following_set = {d["following_id"] for d in following_docs}
+
+    return [
+        {
+            "id":           str(u["_id"]),
+            "name":         u.get("name", ""),
+            "username":     u.get("username", ""),
+            "picture":      u.get("picture"),
+            "is_following": str(u["_id"]) in following_set,
+        }
+        for u in users
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DELETE /posts/{post_id} — Delete own post (owner only)
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -367,6 +367,41 @@ async def update_location_privacy(
 # SEARCH
 # ─────────────────────────────────────────────────────────────────────────────
 
+@router.get("/suggested")
+@limiter.limit("15/minute")
+async def get_suggested_users(
+    request: Request,
+    limit:   int = Query(10, ge=1, le=20),
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    following_docs = await db.follows.find(
+        {"follower_id": user_id},
+        {"following_id": 1, "_id": 0},
+    ).to_list(length=1000)
+    already_following = {d["following_id"] for d in following_docs}
+    already_following.add(user_id)
+
+    pipeline = [
+        {"$match": {"_id": {"$nin": [ObjectId(uid) for uid in already_following]}}},
+        {"$sample": {"size": limit}},
+        {"$project": {"name": 1, "username": 1, "picture": 1, "followers_count": 1}},
+    ]
+    users = await db.users.aggregate(pipeline).to_list(length=limit)
+
+    return [
+        {
+            "id":           str(u["_id"]),
+            "name":         u.get("name", ""),
+            "username":     u.get("username", ""),
+            "picture":      u.get("picture"),
+            "followers_count": u.get("followers_count", 0),
+            "is_following": False,
+        }
+        for u in users
+    ]
+
+
 @router.get("/search")
 @limiter.limit("20/minute")
 async def search_users(
