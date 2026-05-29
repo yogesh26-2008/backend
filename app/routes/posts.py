@@ -16,8 +16,8 @@ from app.cache import get_cache, set_cache, delete_cache, delete_cache_pattern
 from app.utils.cloudinary_transform import optimize_image, optimize_thumbnail, optimize_video
 
 # TTL constants (seconds)
-_FEED_TTL   = 90   # home feed first page
-_SHOTS_TTL  = 90   # shots first page per section
+_FEED_TTL   = 300  # home feed first page (5 min)
+_SHOTS_TTL  = 300  # shots first page per section (5 min)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ def _serialize(post: dict, liked_ids: set) -> dict:
         media_url     = optimize_video(raw_media)
         thumbnail_url = optimize_thumbnail(raw_thumb) if raw_thumb else None
     else:
-        media_url     = optimize_image(raw_media, width=720)
+        media_url     = optimize_image(raw_media, width=540)
         thumbnail_url = optimize_thumbnail(raw_thumb) if raw_thumb else None
 
     return {
