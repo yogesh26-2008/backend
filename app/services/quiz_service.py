@@ -1,10 +1,7 @@
 import asyncio
 import json
 import logging
-import os
 import re
-import subprocess
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -24,34 +21,42 @@ DIFFICULTY_POINTS = {"saral": 1, "samanya": 2, "kathin": 3}
 # STT — Speech to Text
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _extract_audio(video_url: str, tmp_path: str) -> None:
-    """Use ffmpeg subprocess to extract mono 16kHz mp3 from video URL."""
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_url,
-        "-vn",
-        "-ar", "16000",
-        "-ac", "1",
-        "-ab", "64k",
-        "-f", "mp3",
-        tmp_path,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    await asyncio.wait_for(proc.wait(), timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError("ffmpeg failed to extract audio")
+_GROQ_MAX_BYTES = 24 * 1024 * 1024  # 24 MB — Groq Whisper hard limit is 25 MB
 
 
-async def _stt_sarvam(audio_bytes: bytes, api_key: str) -> str:
+async def _download_video(video_url: str) -> bytes:
+    """Download video bytes directly — no ffmpeg needed."""
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        resp = await client.get(video_url)
+        resp.raise_for_status()
+        return resp.content
+
+
+async def _stt_groq_whisper(video_bytes: bytes, api_key: str, filename: str = "video.mp4") -> str:
+    """Send video/audio bytes directly to Groq Whisper (supports mp4, webm, mov, mp3…)."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp4"
+    mime = {
+        "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
+        "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
+    }.get(ext, "video/mp4")
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (filename, video_bytes, mime)},
+            data={"model": "whisper-large-v3", "language": "hi"},
+        )
+        resp.raise_for_status()
+        return resp.json().get("text") or ""
+
+
+async def _stt_sarvam(video_bytes: bytes, api_key: str) -> str:
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         resp = await client.post(
             "https://api.sarvam.ai/speech-to-text",
             headers={"api-subscription-key": api_key},
-            files={"file": ("audio.mp3", audio_bytes, "audio/mpeg")},
+            files={"file": ("audio.mp3", video_bytes, "audio/mpeg")},
             data={"language_code": "hi-IN", "model": "saarika:v1"},
         )
         resp.raise_for_status()
@@ -59,58 +64,59 @@ async def _stt_sarvam(audio_bytes: bytes, api_key: str) -> str:
         return data.get("transcript") or data.get("text") or ""
 
 
-async def _stt_groq_whisper(audio_bytes: bytes, api_key: str) -> str:
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        resp = await client.post(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": ("audio.mp3", audio_bytes, "audio/mpeg")},
-            data={"model": "whisper-large-v3", "language": "hi"},
-        )
-        resp.raise_for_status()
-        return resp.json().get("text") or ""
-
-
-async def get_transcript(db: AsyncIOMotorDatabase, video_id: str, video_url: str) -> str:
+async def get_transcript(db: AsyncIOMotorDatabase, video_id: str, video_url: str, topic: str = "general") -> str:
+    # 1. Cache check
     cached = await db.transcript_cache.find_one({"video_id": video_id})
     if cached:
         logger.info(f"[STT] Cache hit: {video_id}")
         return cached["transcript"]
 
-    logger.info(f"[STT] Extracting audio: {video_id}")
-    tmp_path = os.path.join(tempfile.gettempdir(), f"trandia_{uuid.uuid4().hex}.mp3")
-    try:
-        await _extract_audio(video_url, tmp_path)
-        with open(tmp_path, "rb") as f:
-            audio_bytes = f.read()
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
     transcript = ""
-    providers = [
-        ("sarvam", lambda: _stt_sarvam(audio_bytes, settings.sarvam_api_key), settings.sarvam_api_key),
-        ("groq_whisper", lambda: _stt_groq_whisper(audio_bytes, settings.groq_api_key), settings.groq_api_key),
-    ]
-    for name, fn, key in providers:
-        if not key or key == "your_sarvam_key_here":
-            continue
-        try:
-            transcript = await fn()
-            if transcript.strip():
-                logger.info(f"[STT] Success via {name}")
-                break
-        except Exception as e:
-            logger.error(f"[STT] {name} failed: {e}")
 
+    # 2. Try downloading video and sending to STT providers
+    if video_url:
+        logger.info(f"[STT] Downloading video: {video_id}")
+        try:
+            video_bytes = await _download_video(video_url)
+            if len(video_bytes) > _GROQ_MAX_BYTES:
+                logger.warning(f"[STT] Video too large ({len(video_bytes)//1024//1024}MB), using topic fallback")
+                video_bytes = b""
+        except Exception as e:
+            logger.error(f"[STT] Download failed: {e}")
+            video_bytes = b""
+
+        if video_bytes:
+            # Detect filename from URL for correct MIME type
+            url_path = video_url.split("?")[0].rstrip("/")
+            filename = url_path.rsplit("/", 1)[-1] or "video.mp4"
+            if "." not in filename:
+                filename = "video.mp4"
+
+            providers = [
+                ("groq_whisper", lambda: _stt_groq_whisper(video_bytes, settings.groq_api_key, filename), settings.groq_api_key),
+                ("sarvam", lambda: _stt_sarvam(video_bytes, settings.sarvam_api_key), settings.sarvam_api_key),
+            ]
+            for name, fn, key in providers:
+                if not key or key == "your_sarvam_key_here":
+                    continue
+                try:
+                    transcript = await fn()
+                    if transcript.strip():
+                        logger.info(f"[STT] Success via {name}: {video_id}")
+                        break
+                except Exception as e:
+                    logger.error(f"[STT] {name} failed: {e}")
+
+    # 3. Fallback: use topic as minimal transcript so MCQ can still be generated
     if not transcript:
-        raise RuntimeError("All STT providers failed")
+        transcript = f"Yeh video {topic} topic ke baare mein hai. Is topic ke important concepts, definitions aur key points cover kiye gaye hain."
+        logger.warning(f"[STT] Using topic fallback for {video_id}: topic={topic}")
 
     await db.transcript_cache.insert_one({
         "video_id": video_id,
         "transcript": transcript,
         "language": "hi",
-        "topic_tags": [],
+        "topic_tags": [topic],
         "created_at": datetime.now(timezone.utc),
     })
     return transcript
@@ -265,8 +271,10 @@ async def _run_generation(db: AsyncIOMotorDatabase, quiz_id: str, user_id: str, 
         else:
             transcripts = []
             for vid in video_ids:
-                video_url = pool_map.get(vid, {}).get("video_url", "")
-                t = await get_transcript(db, vid, video_url)
+                entry = pool_map.get(vid, {})
+                video_url = entry.get("video_url", "")
+                topic = entry.get("topic", "general")
+                t = await get_transcript(db, vid, video_url, topic)
                 transcripts.append(t)
 
             questions, provider = await generate_mcqs(pattern, transcripts)
