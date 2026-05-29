@@ -325,11 +325,11 @@ async def trigger_quiz_generation(db: AsyncIOMotorDatabase, user_id: str, quiz_p
 # Watch Event Handler
 # ─────────────────────────────────────────────────────────────────────────────
 
-QUIZ_TRIGGER_COUNT = 5       # TEST: 5 reels → trigger (production: 50)
-POOL_THRESHOLD_PCT  = 5       # TEST: 5% watch → pool entry (production: 65)
-COUNT_THRESHOLD_PCT = 5       # TEST: 5% watch → count++  (production: 35)
-MIN_WATCH_SECONDS   = 1       # TEST: 1s minimum           (production: 15)
-POOL_MIN_SIZE       = 5       # how many videos needed in pool before quiz
+QUIZ_TRIGGER_COUNT  = 15   # quiz triggers after 15 unique learn videos
+POOL_THRESHOLD_PCT  = 65   # 65%+ watch adds video to quiz pool
+COUNT_THRESHOLD_PCT = 35   # 35%+ watch increments learn_view_count
+MIN_WATCH_SECONDS   = 2    # 2s floor (bot prevention only — real guard is % threshold)
+POOL_MIN_SIZE       = 5    # need at least 5 videos in pool to generate quiz
 
 
 async def handle_watch_event(
