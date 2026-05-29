@@ -38,14 +38,34 @@ async def get_notifications(
     )
     docs = await cursor.to_list(length=limit)
 
+    # Collect unique sender IDs so we can batch-fetch their pictures
+    sender_ids = list({
+        d["from_user_id"] for d in docs
+        if d.get("from_user_id")
+    })
+
+    picture_map: dict = {}
+    if sender_ids:
+        try:
+            from bson import ObjectId as _ObjId
+            users = await db.users.find(
+                {"_id": {"$in": [_ObjId(uid) for uid in sender_ids if len(uid) == 24]}},
+                {"picture": 1},
+            ).to_list(length=len(sender_ids))
+            picture_map = {str(u["_id"]): u.get("picture") for u in users}
+        except Exception:
+            pass
+
     result = []
     for d in docs:
+        fuid = d.get("from_user_id") or ""
         result.append({
             "id": str(d["_id"]),
             "type": d.get("type", "follow"),
-            "from_user_id": d.get("from_user_id"),
+            "from_user_id": fuid,
             "from_username": d.get("from_username", ""),
             "from_name": d.get("from_name", ""),
+            "from_picture": picture_map.get(fuid),
             "text": d.get("text", ""),
             "read": d.get("read", False),
             "created_at": d.get("created_at", ""),

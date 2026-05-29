@@ -533,11 +533,20 @@ async def comment_notify(
 
     post = await db.posts.find_one({"_id": ObjectId(post_id)}, {"user_id": 1})
     if not post:
-        return {"ok": True}  # silently OK — post may have been deleted
+        return {"ok": True, "new_count": None}
+
+    # Always increment comment count — even self-comments count
+    result = await db.posts.find_one_and_update(
+        {"_id": ObjectId(post_id)},
+        {"$inc": {"comments_count": 1}},
+        projection={"comments_count": 1},
+        return_document=True,
+    )
+    new_count = result.get("comments_count", 0) if result else None
 
     owner_id = str(post.get("user_id", ""))
     if owner_id == user_id:
-        return {"ok": True}  # no self-notification
+        return {"ok": True, "new_count": new_count}  # no self-notification, but count still updated
 
     commenter, owner = await asyncio.gather(
         db.users.find_one({"_id": ObjectId(user_id)}, {"name": 1, "username": 1}),
@@ -584,7 +593,7 @@ async def comment_notify(
             )
         )
 
-    return {"ok": True}
+    return {"ok": True, "new_count": new_count}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
