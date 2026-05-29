@@ -46,6 +46,13 @@ class Settings(BaseSettings):
         description="Redis connection URL, e.g. redis://localhost:6379 or rediss://... for TLS",
     )
 
+    # ── AI providers (Quiz feature) ───────────────────────────────────────────
+    sarvam_api_key: str = ""
+    groq_api_key: str = ""
+    cerebras_api_key: str = ""
+    sambanova_api_key: str = ""
+    quiz_generation_timeout_ms: int = 10000
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @field_validator("app_secret_key")

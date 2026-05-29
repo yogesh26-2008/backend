@@ -161,6 +161,19 @@ async def _create_indexes():
             [("videoId", ASCENDING)], background=True, name="share_links_video"
         )
 
+        # ── Quiz ──────────────────────────────────────────────────────────────
+        await _db.quizzes.create_index(
+            [("quiz_id", ASCENDING)], unique=True, background=True, name="quizzes_quiz_id"
+        )
+        await _db.quizzes.create_index(
+            [("user_id", ASCENDING)], background=True, name="quizzes_user_id"
+        )
+
+        # ── Transcript Cache ───────────────────────────────────────────────────
+        await _db.transcript_cache.create_index(
+            [("video_id", ASCENDING)], unique=True, background=True, name="transcript_cache_video_id"
+        )
+
         print("[DB] ✅ All indexes verified.")
     except Exception as e:
         print(f"[DB] ⚠️  Index creation warning: {e}")

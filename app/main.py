@@ -21,6 +21,7 @@ from app.routes import media as media_router
 from app.routes import agora as agora_router
 from app.routes import stories as stories_router
 from app.routes import share as share_module
+from app.routes import quiz as quiz_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -311,6 +312,7 @@ app.include_router(agora_router.router, prefix="/agora", tags=["Agora"])
 app.include_router(stories_router.router, prefix="/stories", tags=["Stories"])
 app.include_router(share_module.share_router, prefix="/share", tags=["Share"])
 app.include_router(share_module.preview_router, tags=["Share"])
+app.include_router(quiz_router.router, prefix="/quiz", tags=["Quiz"])
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
