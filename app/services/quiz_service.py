@@ -329,7 +329,7 @@ async def handle_watch_event(
     video_topic: str,
     video_url: str,
 ) -> dict:
-    if watch_duration_seconds < 15:
+    if watch_duration_seconds < 3:
         user = await db.users.find_one({"_id": ObjectId(user_id)}, {"learn_view_count": 1})
         return {"count": user.get("learn_view_count", 0) if user else 0, "quiz_triggered": False}
 
