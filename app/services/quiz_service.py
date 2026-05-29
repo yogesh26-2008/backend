@@ -317,7 +317,7 @@ async def trigger_quiz_generation(db: AsyncIOMotorDatabase, user_id: str, quiz_p
 # Watch Event Handler
 # ─────────────────────────────────────────────────────────────────────────────
 
-QUIZ_TRIGGER_COUNT = 50
+QUIZ_TRIGGER_COUNT = 15
 
 
 async def handle_watch_event(
