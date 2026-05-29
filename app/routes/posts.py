@@ -11,7 +11,7 @@ import logging
 from app.database import get_db
 from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
-from app.services.notification_service import send_like_push, is_fcm_ready
+from app.services.notification_service import send_like_push, send_comment_push, is_fcm_ready
 from app.cache import get_cache, set_cache, delete_cache, delete_cache_pattern
 from app.utils.cloudinary_transform import optimize_image, optimize_thumbnail, optimize_video
 
@@ -503,6 +503,88 @@ async def get_post_likers(
         }
         for u in users
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /posts/{post_id}/comment_notify — Notify post author of new comment
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _CommentNotifyBody(BaseModel):
+    comment_text: str
+
+@router.post("/{post_id}/comment_notify")
+@limiter.limit("30/minute")
+async def comment_notify(
+    request:  Request,
+    post_id:  str,
+    body:     _CommentNotifyBody,
+    user_id:  str = Depends(get_current_user_id),
+    db             = Depends(get_db),
+):
+    """
+    Called by the client when it posts a comment.
+    Saves a notification record and sends FCM push to the post author.
+    Does NOT store the comment itself (client handles local storage).
+    """
+    try:
+        ObjectId(post_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid post ID")
+
+    post = await db.posts.find_one({"_id": ObjectId(post_id)}, {"user_id": 1})
+    if not post:
+        return {"ok": True}  # silently OK — post may have been deleted
+
+    owner_id = str(post.get("user_id", ""))
+    if owner_id == user_id:
+        return {"ok": True}  # no self-notification
+
+    commenter, owner = await asyncio.gather(
+        db.users.find_one({"_id": ObjectId(user_id)}, {"name": 1, "username": 1}),
+        db.users.find_one(
+            {"_id": ObjectId(owner_id)},
+            {"fcm_token": 1, "notification_settings": 1},
+        ),
+    )
+    if not commenter or not owner:
+        return {"ok": True}
+
+    commenter_name     = commenter.get("name", "") or ""
+    commenter_username = commenter.get("username", "") or ""
+    fcm_token          = owner.get("fcm_token")
+    _ns                = owner.get("notification_settings") or {}
+    notif_master       = _ns.get("master", True)
+    notif_comments     = _ns.get("comments", True)
+
+    notif_id = str(ObjectId())
+    now      = datetime.now(timezone.utc)
+
+    await db.notifications.insert_one({
+        "_id":           ObjectId(notif_id),
+        "recipient_id":  owner_id,
+        "type":          "comment",
+        "from_user_id":  user_id,
+        "from_username": commenter_username,
+        "from_name":     commenter_name,
+        "post_id":       post_id,
+        "text":          f"commented: {body.comment_text[:80]}",
+        "read":          False,
+        "created_at":    now,
+    })
+
+    if fcm_token and is_fcm_ready() and notif_master and notif_comments:
+        asyncio.create_task(
+            send_comment_push(
+                fcm_token=fcm_token,
+                commenter_name=commenter_name,
+                commenter_username=commenter_username,
+                post_id=post_id,
+                comment_text=body.comment_text,
+                notif_id=notif_id,
+            )
+        )
+
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

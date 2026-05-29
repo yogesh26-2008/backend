@@ -170,6 +170,59 @@ async def send_message_push(
     await _dispatch(msg, label=f"msg→{sender_username}")
 
 
+async def send_comment_push(
+    fcm_token: str,
+    commenter_name: str,
+    commenter_username: str,
+    post_id: str,
+    comment_text: str,
+    notif_id: str = "",
+):
+    """Send FCM push when someone comments on a post."""
+    title = commenter_name or commenter_username
+    snippet = comment_text[:60] + ("…" if len(comment_text) > 60 else "")
+    body  = f"commented: {snippet}"
+
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        android=messaging.AndroidConfig(
+            priority="high",
+            ttl=3600,
+            notification=messaging.AndroidNotification(
+                title=title,
+                body=body,
+                channel_id="trandia_v4",
+                color="#2196F3",
+                tag=f"comment_{post_id}",
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10", "apns-push-type": "alert"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title=title,
+                        subtitle="New comment",
+                        body=body,
+                    ),
+                    badge=1,
+                    sound="default",
+                )
+            ),
+        ),
+        data={
+            "type":     "comment",
+            "id":       notif_id,
+            "post_id":  post_id,
+            "username": commenter_username,
+            "title":    title,
+            "body":     body,
+        },
+        token=fcm_token,
+    )
+    await _dispatch(msg, label=f"comment→{commenter_username}")
+
+
 async def send_like_push(
     fcm_token: str,
     liker_name: str,
