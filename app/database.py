@@ -142,6 +142,18 @@ async def _create_indexes():
             [("following_id", ASCENDING)], background=True, name="follows_following"
         )
 
+        # ── Blocks ───────────────────────────────────────────────────────────
+        await _db.blocks.create_index(
+            [("blocker_id", ASCENDING), ("blocked_id", ASCENDING)],
+            unique=True, background=True, name="blocks_pair",
+        )
+        await _db.blocks.create_index(
+            [("blocker_id", ASCENDING)], background=True, name="blocks_by_blocker"
+        )
+        await _db.blocks.create_index(
+            [("blocked_id", ASCENDING)], background=True, name="blocks_by_blocked"
+        )
+
         # ── Refresh tokens ────────────────────────────────────────────────────
         await _db.refresh_tokens.create_index(
             [("token", ASCENDING)], unique=True, background=True

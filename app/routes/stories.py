@@ -1,12 +1,13 @@
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import asyncio
+import logging
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-import logging
 
 from app.database import get_db
 from app.limiter import limiter
@@ -15,6 +16,71 @@ from app.utils.cloudinary_transform import optimize_image
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_VALID_DURATIONS = {3, 6, 9, 12, 15, 18, 21, 24}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background cleanup — runs every hour, deletes expired stories from
+# Cloudinary AND MongoDB so storage doesn't fill up.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _delete_from_cloudinary(public_id: str) -> None:
+    """Run Cloudinary destroy in a thread pool (SDK is synchronous)."""
+    if not public_id:
+        return
+    try:
+        import cloudinary.uploader
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: cloudinary.uploader.destroy(public_id, resource_type="image"),
+        )
+        logger.info(f"[cleanup] Cloudinary deleted: {public_id}")
+    except Exception as e:
+        logger.warning(f"[cleanup] Cloudinary delete failed for {public_id}: {e}")
+
+
+async def _run_cleanup_once() -> int:
+    """Delete all expired stories. Returns count of deleted stories."""
+    db = get_db()
+    if db is None:
+        return 0
+    now = datetime.now(timezone.utc)
+    expired = await db.stories.find(
+        {"expires_at": {"$lte": now}},
+        {"_id": 1, "public_id": 1},
+    ).to_list(length=500)
+
+    if not expired:
+        return 0
+
+    # Delete Cloudinary assets concurrently
+    await asyncio.gather(
+        *[_delete_from_cloudinary(s.get("public_id", "")) for s in expired],
+        return_exceptions=True,
+    )
+
+    # Bulk delete from MongoDB
+    ids = [s["_id"] for s in expired]
+    result = await db.stories.delete_many({"_id": {"$in": ids}})
+    count = result.deleted_count
+    logger.info(f"[cleanup] Removed {count} expired stories")
+    return count
+
+
+async def story_cleanup_loop() -> None:
+    """Periodic task: cleans up expired stories every hour."""
+    # Small initial delay so startup is not blocked
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await _run_cleanup_once()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[cleanup] Unexpected error: {e}")
+        await asyncio.sleep(3600)  # every hour
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,8 +174,11 @@ async def create_story(
     user_id: str = Depends(get_current_user_id),
     db       = Depends(get_db),
 ):
-    if body.expires_in_hours not in (6, 12, 24):
-        raise HTTPException(status_code=400, detail="expires_in_hours must be 6, 12, or 24")
+    if body.expires_in_hours not in _VALID_DURATIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"expires_in_hours must be one of {sorted(_VALID_DURATIONS)}",
+        )
 
     if not body.media_url.startswith("https://res.cloudinary.com/"):
         raise HTTPException(status_code=400, detail="Invalid media URL. Must be a Cloudinary URL.")

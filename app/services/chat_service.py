@@ -279,6 +279,18 @@ async def save_message(
     if not conv:
         raise ValueError("Conversation not found or unauthorized")
 
+    # Block check — any participant may have blocked the sender
+    other_ids = [pid for pid in conv["participants"] if pid != sender_id]
+    for other_id in other_ids:
+        block = await db.blocks.find_one({
+            "$or": [
+                {"blocker_id": other_id,  "blocked_id": sender_id},
+                {"blocker_id": sender_id, "blocked_id": other_id},
+            ]
+        })
+        if block:
+            raise ValueError("blocked")
+
     now = created_at or datetime.now(timezone.utc)
     new_message = {
         "conversation_id": conversation_id,

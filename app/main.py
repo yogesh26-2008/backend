@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +23,7 @@ from app.routes import agora as agora_router
 from app.routes import stories as stories_router
 from app.routes import share as share_module
 from app.routes import quiz as quiz_router
+from app.routes.stories import story_cleanup_loop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -239,7 +241,17 @@ async def lifespan(app: FastAPI):
             print("[STARTUP] REDIS_URL not set — caching disabled (set in Railway env vars)")
     except Exception as e:
         print(f"[STARTUP] Redis init error: {e}")
+
+    # Start story expiry cleanup (runs every hour)
+    cleanup_task = asyncio.create_task(story_cleanup_loop())
+
     yield
+
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     await close_redis()
     await close_db()
 

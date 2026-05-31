@@ -413,12 +413,26 @@ async def search_users(
     if not q or not q.strip():
         return []
 
-    q          = q.strip()
-    escaped_q  = re.escape(q)
+    q         = q.strip()
+    escaped_q = re.escape(q)
+
+    # Collect IDs that are blocked in either direction
+    block_docs = await db.blocks.find(
+        {"$or": [{"blocker_id": user_id}, {"blocked_id": user_id}]},
+        {"blocker_id": 1, "blocked_id": 1, "_id": 0},
+    ).to_list(length=1000)
+    hidden_ids = set()
+    for d in block_docs:
+        hidden_ids.add(d["blocker_id"])
+        hidden_ids.add(d["blocked_id"])
+    hidden_ids.discard(user_id)
+
+    exclude_oids = [ObjectId(uid) for uid in hidden_ids]
 
     cursor = db.users.find({
         "$and": [
             {"_id": {"$ne": ObjectId(user_id)}},
+            {"_id": {"$nin": exclude_oids}},
             {"username": {"$regex": escaped_q, "$options": "i"}},
         ]
     }).limit(20)
@@ -435,15 +449,73 @@ async def search_users(
 
     return [
         {
-            "id":          str(u["_id"]),
-            "name":        u["name"],
-            "username":    u["username"],
-            "picture":     u.get("picture"),
-            "public_key":  u.get("public_key"),
+            "id":           str(u["_id"]),
+            "name":         u["name"],
+            "username":     u["username"],
+            "picture":      u.get("picture"),
+            "public_key":   u.get("public_key"),
             "is_following": str(u["_id"]) in following_set,
         }
         for u in users
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BLOCK / UNBLOCK  (must be declared before /{user_id})
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/me/blocked-ids")
+async def get_blocked_ids(
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """Return list of user_ids that the current user has blocked."""
+    docs = await db.blocks.find(
+        {"blocker_id": current_user_id},
+        {"blocked_id": 1, "_id": 0},
+    ).to_list(length=2000)
+    return {"blocked_ids": [d["blocked_id"] for d in docs]}
+
+
+@router.post("/{target_id}/block")
+async def block_user(
+    target_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    if target_id == current_user_id:
+        raise HTTPException(status_code=400, detail="Cannot block yourself")
+    try:
+        ObjectId(target_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user ID")
+
+    # Upsert block record
+    await db.blocks.update_one(
+        {"blocker_id": current_user_id, "blocked_id": target_id},
+        {"$setOnInsert": {
+            "blocker_id": current_user_id,
+            "blocked_id": target_id,
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+    # Also remove follow relationship in both directions
+    await asyncio.gather(
+        db.follows.delete_one({"follower_id": current_user_id, "following_id": target_id}),
+        db.follows.delete_one({"follower_id": target_id,       "following_id": current_user_id}),
+    )
+    return {"ok": True, "blocked": target_id}
+
+
+@router.delete("/{target_id}/block")
+async def unblock_user(
+    target_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    await db.blocks.delete_one({"blocker_id": current_user_id, "blocked_id": target_id})
+    return {"ok": True, "unblocked": target_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -465,30 +537,43 @@ async def get_user_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Check block status in both directions
+    block_you, block_them = await asyncio.gather(
+        db.blocks.find_one({"blocker_id": user_id,         "blocked_id": current_user_id}),
+        db.blocks.find_one({"blocker_id": current_user_id, "blocked_id": user_id}),
+    )
+    if block_you:
+        # This user has blocked the requester — return 403
+        raise HTTPException(status_code=403, detail="blocked_by_user")
+    if block_them:
+        # Requester has blocked this user — still allow profile view but mark it
+        pass  # handled below via is_blocked_by_you field
+
     follow_doc = await db.follows.find_one(
         {"follower_id": current_user_id, "following_id": user_id},
         projection={"_id": 1},
     )
 
     return {
-        "id":              str(user["_id"]),
-        "name":            user["name"],
-        "username":        user["username"],
-        "picture":         user.get("picture"),
-        "public_key":      user.get("public_key"),
-        "followers_count": user.get("followers_count", 0),
-        "following_count": user.get("following_count", 0),
-        "bio":             user.get("bio", ""),
-        "link":            user.get("link", ""),
-        "snapchat_link":   user.get("snapchat_link", ""),
-        "instagram_link":  user.get("instagram_link", ""),
-        "whatsapp_link":   user.get("whatsapp_link", ""),
-        "facebook_link":   user.get("facebook_link", ""),
-        "twitter_link":    user.get("twitter_link", ""),
-        "youtube_link":    user.get("youtube_link", ""),
-        "is_following":    follow_doc is not None,
-        "location_city":   user.get("location_city", "") if user.get("location_public", True) else "",
-        "location_public": user.get("location_public", True),
+        "id":               str(user["_id"]),
+        "name":             user["name"],
+        "username":         user["username"],
+        "picture":          user.get("picture"),
+        "public_key":       user.get("public_key"),
+        "followers_count":  user.get("followers_count", 0),
+        "following_count":  user.get("following_count", 0),
+        "bio":              user.get("bio", ""),
+        "link":             user.get("link", ""),
+        "snapchat_link":    user.get("snapchat_link", ""),
+        "instagram_link":   user.get("instagram_link", ""),
+        "whatsapp_link":    user.get("whatsapp_link", ""),
+        "facebook_link":    user.get("facebook_link", ""),
+        "twitter_link":     user.get("twitter_link", ""),
+        "youtube_link":     user.get("youtube_link", ""),
+        "is_following":     follow_doc is not None,
+        "is_blocked_by_you": block_them is not None,
+        "location_city":    user.get("location_city", "") if user.get("location_public", True) else "",
+        "location_public":  user.get("location_public", True),
     }
 
 
