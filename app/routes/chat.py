@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query, HTTPException
-from typing import List, Optional
+from typing import List, Optional  # noqa: F401 (Optional used in query params)
 import json
 import logging
 import asyncio
@@ -12,6 +12,7 @@ from app.utils.jwt_handler import get_current_user_id, decode_token
 from app.models.chat import ConversationResponse, MessageResponse, ConversationCreate
 from app.services.chat_service import (
     manager,
+    broadcast_presence,
     get_user_conversations,
     get_or_create_conversation,
     get_conversation_messages,
@@ -55,6 +56,7 @@ async def get_messages(
     conversation_id: str,
     skip: int = 0,
     limit: int = 50,
+    before_id: Optional[str] = None,
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
@@ -68,7 +70,7 @@ async def get_messages(
         raise HTTPException(status_code=403, detail="Not a participant in this conversation")
 
     asyncio.create_task(mark_messages_read(conversation_id, user_id, db))
-    return await get_conversation_messages(conversation_id, db, skip, limit)
+    return await get_conversation_messages(conversation_id, db, skip, limit, before_id=before_id)
 
 
 @router.post("/{conversation_id}/messages/{message_id}/react")
@@ -222,6 +224,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     db = get_db()
     sender_doc = await db.users.find_one({"_id": ObjectId(user_id)}, {"username": 1})
     sender_username: str = (sender_doc or {}).get("username", "Someone")
+
+    # Broadcast online presence to conversation partners
+    asyncio.create_task(broadcast_presence(user_id, True, db))
 
     try:
         while True:
@@ -388,3 +393,5 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         logger.error(f"[WS] Unexpected error for {user_id}: {e}")
     finally:
         manager.disconnect(websocket, user_id)
+        # Broadcast offline presence to conversation partners
+        asyncio.create_task(broadcast_presence(user_id, False, db))

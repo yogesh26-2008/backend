@@ -1,11 +1,15 @@
 from typing import Dict, List, Optional
 from fastapi import WebSocket
 import json
+import logging
 from datetime import datetime, timezone
 from bson import ObjectId
 from app.models.chat import MessageResponse, ConversationResponse
 from app.models.user import UserResponse
 from app.database import get_db
+
+logger = logging.getLogger(__name__)
+
 
 class ConnectionManager:
     def __init__(self):
@@ -27,6 +31,12 @@ class ConnectionManager:
             if not self.active_connections[user_id]:
                 del self.active_connections[user_id]
 
+    def is_online(self, user_id: str) -> bool:
+        return bool(self.active_connections.get(user_id))
+
+    def get_online_of(self, user_ids: List[str]) -> List[str]:
+        return [uid for uid in user_ids if self.is_online(uid)]
+
     async def send_personal_message(self, message: str, user_id: str):
         if user_id in self.active_connections:
             dead = []
@@ -42,6 +52,42 @@ class ConnectionManager:
                     pass
 
 manager = ConnectionManager()
+
+
+async def broadcast_presence(user_id: str, online: bool, db) -> None:
+    """
+    On connect: notify all conversation partners that user is online,
+                and send the connecting user a list of which partners are online.
+    On disconnect: notify all conversation partners that user is offline.
+    """
+    try:
+        cursor = db.conversations.find({"participants": user_id}, {"participants": 1})
+        convs = await cursor.to_list(length=200)
+
+        partner_ids: set = set()
+        for c in convs:
+            for pid in c["participants"]:
+                if pid != user_id:
+                    partner_ids.add(pid)
+
+        if not partner_ids:
+            return
+
+        presence_msg = json.dumps({"type": "presence", "user_id": user_id, "online": online})
+        for pid in partner_ids:
+            await manager.send_personal_message(presence_msg, pid)
+
+        # On connect, tell the user which of their partners are already online
+        if online:
+            online_partners = manager.get_online_of(list(partner_ids))
+            if online_partners:
+                init_msg = json.dumps({
+                    "type": "presence_init",
+                    "online_user_ids": online_partners,
+                })
+                await manager.send_personal_message(init_msg, user_id)
+    except Exception as e:
+        logger.error(f"[presence] broadcast_presence error for {user_id}: {e}")
 
 async def get_or_create_conversation(current_user_id: str, participant_username: str, db):
     # Find participant by username (case-insensitive)
@@ -80,6 +126,15 @@ async def get_or_create_conversation(current_user_id: str, participant_username:
 
 
 async def get_user_conversations(user_id: str, db) -> List[ConversationResponse]:
+    from app.cache import get_cache, set_cache
+    cache_key = f"convs:{user_id}"
+    cached = await get_cache(cache_key)
+    if cached and isinstance(cached, list):
+        try:
+            return [ConversationResponse(**c) for c in cached]
+        except Exception:
+            pass  # stale cache schema — fall through to DB
+
     cursor = db.conversations.find({"participants": user_id}).sort("last_message_time", -1)
     convs = await cursor.to_list(length=100)
 
@@ -136,13 +191,45 @@ async def get_user_conversations(user_id: str, db) -> List[ConversationResponse]
                 name=c.get("name")
             )
         )
+
+    try:
+        await set_cache(cache_key, [r.model_dump(mode="json") for r in response], expire_seconds=60)
+    except Exception:
+        pass
     return response
 
 
-async def get_conversation_messages(conversation_id: str, db, skip: int = 0, limit: int = 50) -> List[MessageResponse]:
-    cursor = db.messages.find(
-        {"conversation_id": conversation_id}
-    ).sort("created_at", -1).skip(skip).limit(limit)
+async def get_conversation_messages(
+    conversation_id: str,
+    db,
+    skip: int = 0,
+    limit: int = 50,
+    before_id: Optional[str] = None,
+) -> List[MessageResponse]:
+    from app.cache import get_cache, set_cache
+
+    # Cache only the first page (no skip, no cursor)
+    cache_key = f"msgs:{conversation_id}:{limit}" if (skip == 0 and not before_id) else None
+    if cache_key:
+        cached = await get_cache(cache_key)
+        if cached and isinstance(cached, list):
+            try:
+                return [MessageResponse(**m) for m in cached]
+            except Exception:
+                pass
+
+    query: dict = {"conversation_id": conversation_id}
+    if before_id:
+        try:
+            before_oid = ObjectId(before_id)
+            query["_id"] = {"$lt": before_oid}
+        except Exception:
+            pass
+
+    cursor = db.messages.find(query).sort("created_at", -1)
+    if not before_id:
+        cursor = cursor.skip(skip)
+    cursor = cursor.limit(limit)
     messages = await cursor.to_list(length=limit)
 
     response = []
@@ -161,6 +248,12 @@ async def get_conversation_messages(conversation_id: str, db, skip: int = 0, lim
                 reply_to_text=m.get("reply_to_text"),
             )
         )
+
+    if cache_key:
+        try:
+            await set_cache(cache_key, [m.model_dump(mode="json") for m in response], expire_seconds=30)
+        except Exception:
+            pass
     return response
 
 
@@ -221,6 +314,16 @@ async def save_message(
         {"_id": ObjectId(conversation_id)},
         update_doc
     )
+
+    # Invalidate Redis caches for this conversation and all participants
+    try:
+        from app.cache import delete_cache
+        for pid in conv["participants"]:
+            await delete_cache(f"convs:{pid}")
+        await delete_cache(f"msgs:{conversation_id}:30")
+        await delete_cache(f"msgs:{conversation_id}:50")
+    except Exception:
+        pass
 
     return MessageResponse(
         id=msg_id,
