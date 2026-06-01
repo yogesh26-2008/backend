@@ -615,11 +615,12 @@ async def delete_post(
         {"_id": oid},
         {"user_id": 1, "public_id": 1, "media_type": 1, "section": 1},
     )
+    logger.info(f"[DELETE_POST] post_id={post_id} caller={user_id} found={post is not None} stored_uid={post.get('user_id') if post else 'N/A'}")
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
     if post.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="You can only delete your own posts")
+        raise HTTPException(status_code=403, detail=f"Not authorized: post owner={post.get('user_id')} caller={user_id}")
 
     section    = post.get("section")
     public_id  = post.get("public_id", "")
