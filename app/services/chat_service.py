@@ -135,7 +135,9 @@ async def get_user_conversations(user_id: str, db) -> List[ConversationResponse]
         except Exception:
             pass  # stale cache schema — fall through to DB
 
-    cursor = db.conversations.find({"participants": user_id}).sort("last_message_time", -1)
+    cursor = db.conversations.find(
+        {"participants": user_id, "hidden_for": {"$ne": user_id}}
+    ).sort("last_message_time", -1)
     convs = await cursor.to_list(length=100)
 
     # Gather all unique participant IDs across conversations
@@ -332,8 +334,8 @@ async def save_message(
         from app.cache import delete_cache
         for pid in conv["participants"]:
             await delete_cache(f"convs:{pid}")
-        await delete_cache(f"msgs:{conversation_id}:30")
-        await delete_cache(f"msgs:{conversation_id}:50")
+        for lim in (20, 30, 50, 100):
+            await delete_cache(f"msgs:{conversation_id}:{lim}")
     except Exception:
         pass
 
@@ -403,3 +405,8 @@ async def mark_messages_read(conversation_id: str, user_id: str, db):
         {"_id": ObjectId(conversation_id)},
         {"$set": {f"unread_counts.{user_id}": 0}}
     )
+    try:
+        from app.cache import delete_cache
+        await delete_cache(f"convs:{user_id}")
+    except Exception:
+        pass

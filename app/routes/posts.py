@@ -611,24 +611,48 @@ async def delete_post(
     except (InvalidId, Exception):
         raise HTTPException(status_code=400, detail="Invalid post ID")
 
-    post = await db.posts.find_one({"_id": oid}, {"user_id": 1})
+    post = await db.posts.find_one(
+        {"_id": oid},
+        {"user_id": 1, "public_id": 1, "media_type": 1, "section": 1},
+    )
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
     if post.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="You can only delete your own posts")
 
-    section = post.get("section")
+    section    = post.get("section")
+    public_id  = post.get("public_id", "")
+    media_type = post.get("media_type", "image")  # "image" | "video"
+
+    # Delete from MongoDB first
     await db.posts.delete_one({"_id": oid})
     await asyncio.gather(
         db.post_likes.delete_many({"post_id": post_id}),
         db.notifications.delete_many({"post_id": post_id}),
     )
 
-    # Invalidate feed cache for this user
+    # Delete from Cloudinary (fire-and-forget — don't block response)
+    if public_id:
+        asyncio.create_task(_delete_from_cloudinary(public_id, media_type))
+
+    # Invalidate feed / shots cache
     await delete_cache_pattern(f"feed:u:{user_id}:*")
     if section:
         await delete_cache_pattern(f"shots:u:{user_id}:{section}:*")
 
-    logger.info(f"[POST] deleted id={post_id} user={user_id}")
+    logger.info(f"[POST] deleted id={post_id} user={user_id} public_id={public_id}")
     return {"deleted": True}
+
+
+async def _delete_from_cloudinary(public_id: str, media_type: str) -> None:
+    """Fire-and-forget helper — deletes the asset from Cloudinary."""
+    try:
+        from app.services.media_service import get_media_provider
+        provider = get_media_provider()
+        resource_type = "video" if media_type == "video" else "image"
+        ok = await provider.delete(public_id, resource_type=resource_type)
+        if not ok:
+            logger.warning(f"[CLOUDINARY] delete returned not-ok for {public_id}")
+    except Exception as e:
+        logger.error(f"[CLOUDINARY] delete task error public_id={public_id}: {e}")

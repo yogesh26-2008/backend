@@ -127,6 +127,18 @@ async def delete_message(
         raise HTTPException(status_code=403, detail="Not authorized to delete this message")
 
     await db.messages.delete_one({"_id": msg_oid})
+
+    # Broadcast deletion to all participants so their UI updates instantly
+    conv = await db.conversations.find_one({"_id": ObjectId(conversation_id)}, {"participants": 1})
+    if conv:
+        broadcast = json.dumps({
+            "type": "message_deleted",
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+        })
+        for pid in conv["participants"]:
+            await manager.send_personal_message(broadcast, pid)
+
     return {"detail": "Message deleted"}
 
 
@@ -145,9 +157,27 @@ async def delete_conversation(
     if not conv:
         raise HTTPException(status_code=403, detail="Not a participant in this conversation")
 
-    await db.messages.delete_many({"conversation_id": conversation_id})
-    await db.conversations.delete_one({"_id": oid})
-    return {"detail": "Conversation deleted"}
+    # Soft-delete: only hide for the requesting user.
+    # When ALL participants have hidden it, permanently delete.
+    await db.conversations.update_one(
+        {"_id": oid},
+        {"$addToSet": {"hidden_for": user_id}},
+    )
+    updated = await db.conversations.find_one({"_id": oid}, {"hidden_for": 1, "participants": 1})
+    hidden = set(updated.get("hidden_for", []))
+    all_participants = set(updated.get("participants", []))
+    if all_participants and hidden >= all_participants:
+        # Everyone has cleared — now actually delete
+        await db.messages.delete_many({"conversation_id": conversation_id})
+        await db.conversations.delete_one({"_id": oid})
+
+    # Invalidate cache for this user
+    try:
+        from app.cache import delete_cache
+        await delete_cache(f"convs:{user_id}")
+    except Exception:
+        pass
+    return {"detail": "Conversation cleared"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
