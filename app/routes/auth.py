@@ -23,6 +23,14 @@ class CleanupFirebaseRequest(BaseModel):
     email: EmailStr
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str = ""
+
+
 router = APIRouter()
 _signer = URLSafeTimedSerializer(settings.app_secret_key)
 
@@ -180,3 +188,28 @@ async def google_callback(
     return RedirectResponse(
         f"{redirect_base}/?token={result.access_token}&user={user_json}&message={message}"
     )
+
+
+# ── Token Refresh ─────────────────────────────────────────────────────────────
+
+@router.post("/refresh", response_model=AuthResponse)
+@limiter.limit("30/minute")
+async def refresh_token(request: Request, data: RefreshRequest, db=Depends(get_db)):
+    """
+    Exchange a valid refresh token for a new access_token + refresh_token pair.
+    The old refresh token is immediately revoked (rotation).
+    Returns 401 if the refresh token is expired, revoked, or not found.
+    """
+    return await auth_service.refresh_access_token(data.refresh_token, db)
+
+
+# ── Logout (revoke refresh token) ─────────────────────────────────────────────
+
+@router.post("/logout")
+async def logout(request: Request, data: LogoutRequest, db=Depends(get_db)):
+    """
+    Revoke the refresh token so it can never be used again.
+    The access token will naturally expire; Flutter deletes it locally.
+    """
+    await auth_service.revoke_refresh_token(data.refresh_token, db)
+    return {"message": "Logged out successfully."}

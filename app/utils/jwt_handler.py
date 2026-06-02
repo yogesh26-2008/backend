@@ -1,3 +1,4 @@
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
@@ -12,6 +13,14 @@ def create_access_token(user_id: str, email: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
     payload = {"sub": user_id, "email": email, "exp": expire}
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def create_refresh_token() -> str:
+    """
+    Generate a cryptographically secure opaque refresh token (64 URL-safe chars).
+    Not a JWT — stored in MongoDB so it can be revoked at any time.
+    """
+    return secrets.token_urlsafe(48)
 
 
 def decode_token(token: str) -> Optional[dict]:

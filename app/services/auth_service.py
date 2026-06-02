@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import bcrypt as _bcrypt
 import httpx
 import base64
@@ -11,9 +11,10 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 from typing import Optional
 
+from bson import ObjectId
 from app.config import settings
 from app.models.user import UserLogin, UserResponse, AuthResponse, FirebaseSignupRequest
-from app.utils.jwt_handler import create_access_token
+from app.utils.jwt_handler import create_access_token, create_refresh_token
 from app.utils.password import hash_password, verify_password
 from app.services.notification_service import schedule_welcome_notification, _initialized as firebase_initialized
 
@@ -22,9 +23,25 @@ from app.services.notification_service import schedule_welcome_notification, _in
 _DUMMY_HASH: str = _bcrypt.hashpw(b"__timing_equalization__", _bcrypt.gensalt(4)).decode()
 
 
-def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
+async def _build_auth_response(
+    user_doc: dict, message: str, db: AsyncIOMotorDatabase
+) -> AuthResponse:
     uid = str(user_doc["_id"])
-    token = create_access_token(uid, user_doc["email"])
+    access_token = create_access_token(uid, user_doc["email"])
+    refresh_token = create_refresh_token()
+
+    # Store refresh token in MongoDB (with 7-day TTL).
+    # We keep the old tokens for this user valid â€” they get naturally superseded
+    # by the rotation on next /auth/refresh call.
+    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_expire_days)
+    await db.refresh_tokens.insert_one({
+        "token": refresh_token,
+        "user_id": uid,
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": expires_at,
+        "revoked": False,
+    })
+
     user = UserResponse(
         id=uid,
         name=user_doc["name"],
@@ -36,7 +53,12 @@ def _build_auth_response(user_doc: dict, message: str) -> AuthResponse:
         followers_count=user_doc.get("followers_count", 0),
         following_count=user_doc.get("following_count", 0),
     )
-    return AuthResponse(access_token=token, user=user, message=message)
+    return AuthResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user=user,
+        message=message,
+    )
 
 
 def _require_db(db: AsyncIOMotorDatabase):
@@ -65,29 +87,29 @@ async def _verify_firebase_token(token_str: str) -> dict:
     """
     Verify Firebase ID token.
     Strategy:
-      1. Try firebase_admin.auth.verify_id_token() — most secure (uses Google public keys)
+      1. Try firebase_admin.auth.verify_id_token() â€” most secure (uses Google public keys)
       2. If firebase_admin not initialized, fall back to REST API
       3. If REST API fails, fall back to JWT payload decode (least secure but still checks email_verified)
     Returns dict with 'email' and 'email_verified' fields.
     """
 
-    # ── Method 1: Firebase Admin SDK ─────────────────────────────────────────
+    # â”€â”€ Method 1: Firebase Admin SDK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if firebase_initialized:
         try:
             from firebase_admin import auth as fb_auth
             decoded = await asyncio.to_thread(
                 fb_auth.verify_id_token, token_str, check_revoked=False
             )
-            print(f"[AUTH] ✅ Firebase Admin token verified. email={decoded.get('email')} verified={decoded.get('email_verified')}")
+            print(f"[AUTH] âœ… Firebase Admin token verified. email={decoded.get('email')} verified={decoded.get('email_verified')}")
             return {
                 "email": decoded.get("email"),
                 "emailVerified": decoded.get("email_verified", False),
             }
         except Exception as e:
-            print(f"[AUTH] ⚠️ Firebase Admin verify failed: {type(e).__name__}: {e}")
+            print(f"[AUTH] âš ï¸ Firebase Admin verify failed: {type(e).__name__}: {e}")
             # Fall through to next method
 
-    # ── Method 2: Firebase REST API ──────────────────────────────────────────
+    # â”€â”€ Method 2: Firebase REST API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -102,13 +124,13 @@ async def _verify_firebase_token(token_str: str) -> dict:
             users = data.get("users", [])
             if users:
                 user = users[0]
-                print(f"[AUTH] ✅ REST API verified. email={user.get('email')} verified={user.get('emailVerified')}")
+                print(f"[AUTH] âœ… REST API verified. email={user.get('email')} verified={user.get('emailVerified')}")
                 return user
     except Exception as e:
-        print(f"[AUTH] ⚠️ Firebase REST API failed: {type(e).__name__}: {e}")
+        print(f"[AUTH] âš ï¸ Firebase REST API failed: {type(e).__name__}: {e}")
 
-    # ── Method 3: JWT Payload Decode (fallback) ───────────────────────────────
-    print("[AUTH] ⚠️ Using JWT payload decode fallback (no signature verification)")
+    # â”€â”€ Method 3: JWT Payload Decode (fallback) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    print("[AUTH] âš ï¸ Using JWT payload decode fallback (no signature verification)")
     payload = _decode_firebase_jwt_payload(token_str)
     print(f"[AUTH] JWT payload: iss={payload.get('iss')} email={payload.get('email')} verified={payload.get('email_verified')}")
 
@@ -143,14 +165,14 @@ async def _verify_google_id_token(token_str: str) -> dict | None:
     return None
 
 
-# ── Firebase Email Verification Signup ───────────────────────────────────────
+# â”€â”€ Firebase Email Verification Signup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def signup_with_firebase_verified_email(
     data: FirebaseSignupRequest, db: AsyncIOMotorDatabase
 ) -> AuthResponse:
     _require_db(db)
 
-    print(f"[AUTH] Signup attempt — name={data.name} username={data.username}")
+    print(f"[AUTH] Signup attempt â€” name={data.name} username={data.username}")
 
     # Verify Firebase token (tries 3 methods)
     firebase_user = await _verify_firebase_token(data.firebase_id_token)
@@ -198,12 +220,12 @@ async def signup_with_firebase_verified_email(
         )
 
     doc["_id"] = result.inserted_id
-    print(f"[AUTH] ✅ Account created: {email}")
+    print(f"[AUTH] âœ… Account created: {email}")
     schedule_welcome_notification(data.fcm_token, data.name, is_signup=True)
-    return _build_auth_response(doc, "Account created successfully. Welcome to Trandia!")
+    return await _build_auth_response(doc, "Account created successfully. Welcome to Trandia!", db)
 
 
-# ── Email/Password Login ──────────────────────────────────────────────────────
+# â”€â”€ Email/Password Login â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthResponse:
     _require_db(db)
@@ -227,10 +249,10 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
 
     notif_master = user.get("notification_settings", {}).get("master", True)
     schedule_welcome_notification(data.fcm_token, user["name"], is_signup=False, master_enabled=notif_master)
-    return _build_auth_response(user, "Welcome back to Trandia!")
+    return await _build_auth_response(user, "Welcome back to Trandia!", db)
 
 
-# ── Google Auth ───────────────────────────────────────────────────────────────
+# â”€â”€ Google Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def auth_with_google_userinfo(
     userinfo: dict, fcm_token: Optional[str], db: AsyncIOMotorDatabase
@@ -261,7 +283,7 @@ async def auth_with_google_userinfo(
             existing["fcm_token"] = fcm_token
         notif_master = existing.get("notification_settings", {}).get("master", True)
         schedule_welcome_notification(fcm_token, existing["name"], is_signup=False, master_enabled=notif_master)
-        return _build_auth_response(existing, "Welcome back to Trandia!")
+        return await _build_auth_response(existing, "Welcome back to Trandia!", db)
 
     base_username = email.split("@")[0].lower().replace(".", "")
     username = base_username
@@ -293,12 +315,12 @@ async def auth_with_google_userinfo(
             if existing:
                 notif_master = existing.get("notification_settings", {}).get("master", True)
                 schedule_welcome_notification(fcm_token, existing["name"], is_signup=False, master_enabled=notif_master)
-                return _build_auth_response(existing, "Welcome back to Trandia!")
+                return await _build_auth_response(existing, "Welcome back to Trandia!", db)
         raise HTTPException(status_code=400, detail="Account already exists")
 
     doc["_id"] = result.inserted_id
     schedule_welcome_notification(fcm_token, name, is_signup=True)
-    return _build_auth_response(doc, "Account created with Google. Welcome to Trandia!")
+    return await _build_auth_response(doc, "Account created with Google. Welcome to Trandia!", db)
 
 
 async def cleanup_orphaned_firebase_user(
@@ -312,7 +334,7 @@ async def cleanup_orphaned_firebase_user(
     """
     _require_db(db)
 
-    # If the email IS in MongoDB, it's a real account — don't touch it.
+    # If the email IS in MongoDB, it's a real account â€” don't touch it.
     existing = await db.users.find_one({"email": email}, projection={"_id": 1})
     if existing:
         raise HTTPException(
@@ -320,23 +342,23 @@ async def cleanup_orphaned_firebase_user(
             detail="This email is already registered. Please sign in instead.",
         )
 
-    # Email NOT in MongoDB → orphaned Firebase user. Delete it.
+    # Email NOT in MongoDB â†’ orphaned Firebase user. Delete it.
     # Method 1: Firebase Admin SDK
     if firebase_initialized:
         try:
             from firebase_admin import auth as fb_auth
             fb_user = await asyncio.to_thread(fb_auth.get_user_by_email, email)
             await asyncio.to_thread(fb_auth.delete_user, fb_user.uid)
-            print(f"[AUTH] 🧹 Orphaned Firebase user deleted (Admin SDK): {email}")
+            print(f"[AUTH] ðŸ§¹ Orphaned Firebase user deleted (Admin SDK): {email}")
             return {"cleaned": True, "message": "Orphaned account cleaned up. Please sign up again."}
         except Exception as e:
-            print(f"[AUTH] ⚠️ Admin SDK cleanup failed: {type(e).__name__}: {e}")
+            print(f"[AUTH] âš ï¸ Admin SDK cleanup failed: {type(e).__name__}: {e}")
             # Fall through to REST API
 
-    # Method 2: Firebase REST API — can't delete users, but we can confirm the orphan
+    # Method 2: Firebase REST API â€” can't delete users, but we can confirm the orphan
     # Since REST API can't delete users without Admin SDK, we return a message
     # telling the client to proceed with a password reset flow or retry
-    print(f"[AUTH] 🧹 Email {email} not in MongoDB — orphaned Firebase user confirmed")
+    print(f"[AUTH] ðŸ§¹ Email {email} not in MongoDB â€” orphaned Firebase user confirmed")
     return {"cleaned": False, "message": "Account not found in our system. Firebase Admin unavailable for cleanup."}
 
 
@@ -348,3 +370,72 @@ async def auth_with_google_id_token(
     if not idinfo:
         raise HTTPException(status_code=401, detail="Invalid Google token")
     return await auth_with_google_userinfo(idinfo, fcm_token, db)
+
+
+# ── Token Refresh ─────────────────────────────────────────────────────────────
+
+async def refresh_access_token(
+    refresh_token_str: str, db: AsyncIOMotorDatabase
+) -> AuthResponse:
+    """
+    Validate a refresh token, rotate it (revoke old, issue new), and return
+    a fresh access_token + refresh_token pair.
+
+    Rotation strategy:
+      - Old refresh token is marked revoked immediately.
+      - A brand-new refresh token is issued alongside the new access token.
+      - Expired or revoked tokens are rejected with HTTP 401.
+    """
+    _require_db(db)
+
+    now = datetime.now(timezone.utc)
+
+    # Look up token — must exist, not revoked, not expired
+    token_doc = await db.refresh_tokens.find_one({
+        "token": refresh_token_str,
+        "revoked": False,
+        "expires_at": {"$gt": now},
+    })
+
+    if not token_doc:
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token is invalid or has expired. Please sign in again."
+        )
+
+    user_id = token_doc["user_id"]
+
+    # Load user
+    try:
+        user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+    except Exception:
+        user_doc = None
+
+    if not user_doc:
+        raise HTTPException(
+            status_code=401,
+            detail="Account not found. Please sign in again."
+        )
+
+    # Revoke the old refresh token (rotation — prevents reuse)
+    await db.refresh_tokens.update_one(
+        {"_id": token_doc["_id"]},
+        {"$set": {"revoked": True, "revoked_at": now}}
+    )
+
+    print(f"[AUTH] Token rotated for user_id={user_id}")
+    return await _build_auth_response(user_doc, "Token refreshed successfully.", db)
+
+
+async def revoke_refresh_token(refresh_token_str: str, db: AsyncIOMotorDatabase) -> None:
+    """
+    Revoke a specific refresh token (called on logout).
+    Silently ignores unknown tokens so logout never fails.
+    """
+    if not refresh_token_str or db is None:
+        return
+    await db.refresh_tokens.update_one(
+        {"token": refresh_token_str},
+        {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc)}}
+    )
+

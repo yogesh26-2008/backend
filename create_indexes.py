@@ -117,6 +117,31 @@ async def create_indexes():
     )
     print("✅ post_likes: (user_id, post_id)")
 
+    # ── refresh_tokens ────────────────────────────────────────
+    # Fast lookup by token string (used on every /auth/refresh call)
+    await db.refresh_tokens.create_index(
+        [("token", 1)],
+        unique=True,
+        name="refresh_token_unique"
+    )
+    print("✅ refresh_tokens: token (unique)")
+
+    # Query by user_id to revoke all tokens on password change / security event
+    await db.refresh_tokens.create_index(
+        [("user_id", 1)],
+        name="refresh_token_by_user"
+    )
+    print("✅ refresh_tokens: user_id")
+
+    # Auto-expire documents 30 days after expires_at
+    # (extra safety net in case manual revocation is missed)
+    await db.refresh_tokens.create_index(
+        [("expires_at", 1)],
+        expireAfterSeconds=30 * 24 * 3600,
+        name="refresh_token_ttl"
+    )
+    print("✅ refresh_tokens: expires_at (TTL — auto-delete after 30d)")
+
     print("\n🎉 All indexes created successfully!")
     client.close()
 

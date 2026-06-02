@@ -56,6 +56,7 @@ class UserResponse(BaseModel):
 
 class AuthResponse(BaseModel):
     access_token: str
+    refresh_token: str = ""          # opaque token stored in MongoDB, 7-day TTL
     token_type: str = "bearer"
     user: UserResponse
     message: str
