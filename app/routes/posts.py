@@ -657,3 +657,313 @@ async def _delete_from_cloudinary(public_id: str, media_type: str) -> None:
             logger.warning(f"[CLOUDINARY] delete returned not-ok for {public_id}")
     except Exception as e:
         logger.error(f"[CLOUDINARY] delete task error public_id={public_id}: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMMENTS — POST /posts/{post_id}/comments
+#             GET  /posts/{post_id}/comments
+#             DELETE /posts/comments/{comment_id}
+#             POST   /posts/comments/{comment_id}/like
+#             DELETE /posts/comments/{comment_id}/like
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fmt_comment(doc: dict, current_user_id: str, liked_ids: set) -> dict:
+    """Serialise a MongoDB comment document for the API response."""
+    cid = str(doc["_id"])
+    return {
+        "id":           cid,
+        "post_id":      doc.get("post_id", ""),
+        "user_id":      doc.get("user_id", ""),
+        "user_name":    doc.get("user_name", ""),
+        "user_username":doc.get("user_username", ""),
+        "user_picture": doc.get("user_picture"),
+        "text":         doc.get("text", ""),
+        "parent_id":    doc.get("parent_id"),
+        "likes_count":  doc.get("likes_count", 0),
+        "is_liked":     cid in liked_ids,
+        "created_at":   doc["created_at"].isoformat() if "created_at" in doc else "",
+    }
+
+
+class _CommentBody(BaseModel):
+    text: str
+    parent_id: Optional[str] = None   # null → top-level; str → reply
+
+
+@router.post("/{post_id}/comments")
+@limiter.limit("30/minute")
+async def create_comment(
+    request:  Request,
+    post_id:  str,
+    body:     _CommentBody,
+    user_id:  str = Depends(get_current_user_id),
+    db             = Depends(get_db),
+):
+    """
+    Post a new comment (or reply) on a post.
+    - Stores in `comments` collection.
+    - Increments `posts.comments_count` atomically.
+    - Sends FCM + DB notification to the post owner (non-self).
+    """
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Comment text cannot be empty.")
+    if len(text) > 1000:
+        raise HTTPException(status_code=400, detail="Comment too long (max 1000 chars).")
+
+    try:
+        post_oid = ObjectId(post_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid post ID.")
+
+    post = await db.posts.find_one({"_id": post_oid}, {"user_id": 1})
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found.")
+
+    # Resolve parent: must belong to the same post, be top-level (no nested replies)
+    parent_id: Optional[str] = None
+    if body.parent_id:
+        try:
+            parent_oid = ObjectId(body.parent_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid parent_id.")
+        parent_doc = await db.comments.find_one(
+            {"_id": parent_oid, "post_id": post_id},
+            {"parent_id": 1},
+        )
+        if not parent_doc:
+            raise HTTPException(status_code=404, detail="Parent comment not found.")
+        # Flatten: if parent is already a reply, attach to its own parent (1-level max)
+        parent_id = parent_doc.get("parent_id") or body.parent_id
+
+    # Fetch commenter info
+    commenter = await db.users.find_one(
+        {"_id": ObjectId(user_id)},
+        {"name": 1, "username": 1, "picture": 1},
+    )
+    if not commenter:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    now = datetime.now(timezone.utc)
+    comment_doc = {
+        "post_id":      post_id,
+        "user_id":      user_id,
+        "user_name":    commenter.get("name", ""),
+        "user_username":commenter.get("username", ""),
+        "user_picture": commenter.get("picture"),
+        "text":         text,
+        "parent_id":    parent_id,
+        "likes_count":  0,
+        "created_at":   now,
+    }
+    result = await db.comments.insert_one(comment_doc)
+    comment_doc["_id"] = result.inserted_id
+
+    # Atomically increment post comments_count
+    await db.posts.update_one({"_id": post_oid}, {"$inc": {"comments_count": 1}})
+
+    # ── Notification (non-self, top-level comment only) ───────────────────────
+    owner_id = str(post.get("user_id", ""))
+    if owner_id != user_id and parent_id is None:
+        owner = await db.users.find_one(
+            {"_id": ObjectId(owner_id)},
+            {"fcm_token": 1, "notification_settings": 1},
+        )
+        if owner:
+            _ns            = owner.get("notification_settings") or {}
+            notif_master   = _ns.get("master", True)
+            notif_comments = _ns.get("comments", True)
+            fcm_token      = owner.get("fcm_token")
+            notif_id       = str(ObjectId())
+
+            await db.notifications.insert_one({
+                "_id":           ObjectId(notif_id),
+                "recipient_id":  owner_id,
+                "type":          "comment",
+                "from_user_id":  user_id,
+                "from_username": commenter.get("username", ""),
+                "from_name":     commenter.get("name", ""),
+                "post_id":       post_id,
+                "text":          f"commented: {text[:80]}",
+                "read":          False,
+                "created_at":    now,
+            })
+
+            if fcm_token and is_fcm_ready() and notif_master and notif_comments:
+                asyncio.create_task(
+                    send_comment_push(
+                        fcm_token=fcm_token,
+                        commenter_name=commenter.get("name", ""),
+                        commenter_username=commenter.get("username", ""),
+                        post_id=post_id,
+                        comment_text=text,
+                        notif_id=notif_id,
+                    )
+                )
+
+    return {
+        "comment": _fmt_comment(comment_doc, user_id, set()),
+        "new_count": None,  # not fetched here — caller already updates optimistically
+    }
+
+
+@router.get("/{post_id}/comments")
+@limiter.limit("60/minute")
+async def get_comments(
+    request:  Request,
+    post_id:  str,
+    cursor:   Optional[str] = Query(None, description="Last seen comment _id for pagination"),
+    limit:    int           = Query(20, ge=1, le=50),
+    user_id:  str = Depends(get_current_user_id),
+    db             = Depends(get_db),
+):
+    """
+    Fetch top-level comments for a post (oldest-first, cursor-paginated).
+    Each top-level comment includes its replies inline.
+    """
+    try:
+        ObjectId(post_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid post ID.")
+
+    # Cursor-based pagination — fetch comments AFTER the given cursor id
+    query: dict = {"post_id": post_id, "parent_id": None}
+    if cursor:
+        try:
+            query["_id"] = {"$gt": ObjectId(cursor)}
+        except Exception:
+            pass  # ignore bad cursor — return from beginning
+
+    top_docs = await db.comments.find(query).sort("_id", 1).limit(limit).to_list(limit)
+
+    if not top_docs:
+        return {"comments": [], "next_cursor": None}
+
+    top_ids = [str(d["_id"]) for d in top_docs]
+
+    # Fetch all replies for these top-level comments in a single query
+    reply_docs = await db.comments.find(
+        {"post_id": post_id, "parent_id": {"$in": top_ids}}
+    ).sort("_id", 1).to_list(200)
+
+    # Fetch liked set for current user (both top-level and replies)
+    all_ids = top_ids + [str(d["_id"]) for d in reply_docs]
+    liked_docs = await db.comment_likes.find(
+        {"comment_id": {"$in": all_ids}, "user_id": user_id},
+        {"comment_id": 1},
+    ).to_list(300)
+    liked_ids = {d["comment_id"] for d in liked_docs}
+
+    # Group replies by parent_id
+    replies_by_parent: dict[str, list] = {}
+    for r in reply_docs:
+        pid = r.get("parent_id", "")
+        replies_by_parent.setdefault(pid, []).append(_fmt_comment(r, user_id, liked_ids))
+
+    # Build response
+    comments_out = []
+    for doc in top_docs:
+        cid = str(doc["_id"])
+        item = _fmt_comment(doc, user_id, liked_ids)
+        item["replies"] = replies_by_parent.get(cid, [])
+        comments_out.append(item)
+
+    next_cursor = top_ids[-1] if len(top_docs) == limit else None
+
+    return {"comments": comments_out, "next_cursor": next_cursor}
+
+
+@router.delete("/comments/{comment_id}")
+async def delete_comment(
+    comment_id: str,
+    user_id:    str = Depends(get_current_user_id),
+    db               = Depends(get_db),
+):
+    """
+    Delete a comment. Only the comment author or the post owner may delete.
+    Decrements posts.comments_count (and replies' count) atomically.
+    """
+    try:
+        coid = ObjectId(comment_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail="Invalid comment ID.")
+
+    comment = await db.comments.find_one({"_id": coid})
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found.")
+
+    post_id = comment.get("post_id", "")
+    post = await db.posts.find_one({"_id": ObjectId(post_id)}, {"user_id": 1}) if post_id else None
+    post_owner = str(post.get("user_id", "")) if post else ""
+
+    if comment.get("user_id") != user_id and post_owner != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this comment.")
+
+    # Count replies (we'll decrement those too)
+    reply_count = await db.comments.count_documents(
+        {"post_id": post_id, "parent_id": comment_id}
+    )
+
+    await db.comments.delete_one({"_id": coid})
+    await db.comments.delete_many({"post_id": post_id, "parent_id": comment_id})
+    await db.comment_likes.delete_many({"comment_id": comment_id})
+
+    total_decrement = 1 + reply_count
+    if post_id:
+        await db.posts.update_one(
+            {"_id": ObjectId(post_id)},
+            {"$inc": {"comments_count": -total_decrement}},
+        )
+
+    return {"deleted": True}
+
+
+@router.post("/comments/{comment_id}/like")
+@limiter.limit("60/minute")
+async def like_comment(
+    request:    Request,
+    comment_id: str,
+    user_id:    str = Depends(get_current_user_id),
+    db               = Depends(get_db),
+):
+    try:
+        coid = ObjectId(comment_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid comment ID.")
+
+    comment = await db.comments.find_one({"_id": coid}, {"_id": 1})
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found.")
+
+    from pymongo.errors import DuplicateKeyError
+    try:
+        await db.comment_likes.insert_one(
+            {"comment_id": comment_id, "user_id": user_id, "created_at": datetime.now(timezone.utc)}
+        )
+        await db.comments.update_one({"_id": coid}, {"$inc": {"likes_count": 1}})
+    except DuplicateKeyError:
+        pass  # already liked — idempotent
+
+    return {"liked": True}
+
+
+@router.delete("/comments/{comment_id}/like")
+@limiter.limit("60/minute")
+async def unlike_comment(
+    request:    Request,
+    comment_id: str,
+    user_id:    str = Depends(get_current_user_id),
+    db               = Depends(get_db),
+):
+    try:
+        coid = ObjectId(comment_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid comment ID.")
+
+    result = await db.comment_likes.delete_one(
+        {"comment_id": comment_id, "user_id": user_id}
+    )
+    if result.deleted_count:
+        await db.comments.update_one({"_id": coid}, {"$inc": {"likes_count": -1}})
+
+    return {"liked": False}

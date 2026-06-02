@@ -142,7 +142,29 @@ async def create_indexes():
     )
     print("✅ refresh_tokens: expires_at (TTL — auto-delete after 30d)")
 
-    print("\n🎉 All indexes created successfully!")
+    # ── comments ──────────────────────────────────────────────
+    # Fetch top-level comments for a post (oldest-first pagination)
+    await db.comments.create_index(
+        [("post_id", 1), ("parent_id", 1), ("_id", 1)],
+        name="comments_by_post_parent_id"
+    )
+    print("comments: (post_id, parent_id, _id ASC)")
+
+    # comment_likes — prevent duplicate likes, fast lookup
+    await db.comment_likes.create_index(
+        [("comment_id", 1), ("user_id", 1)],
+        unique=True,
+        name="comment_likes_unique"
+    )
+    print("comment_likes: (comment_id, user_id) unique")
+
+    await db.comment_likes.create_index(
+        [("user_id", 1), ("comment_id", 1)],
+        name="comment_likes_by_user"
+    )
+    print("comment_likes: (user_id, comment_id)")
+
+    print("\n All indexes created successfully!")
     client.close()
 
 if __name__ == "__main__":
