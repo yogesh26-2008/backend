@@ -274,6 +274,34 @@ async def send_like_push(
     await _dispatch(msg, label=f"like→{liker_username}")
 
 
+async def send_quiz_ready_push(fcm_token: str, quiz_id: str, user_id: str):
+    """
+    Data-only FCM message sent when a quiz finishes generating.
+
+    Deliberately has NO visible notification banner — it silently wakes
+    QuizLoadingScreen (and ShotsScreen) which are already open and waiting.
+    Data-only = Flutter's onMessage fires in the foreground; the app handles
+    the navigation itself.
+    """
+    msg = messaging.Message(
+        # No `notification` field → silent data push, no banner shown
+        android=messaging.AndroidConfig(priority="high"),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "5", "apns-push-type": "background"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(content_available=True),  # wake iOS in bg
+            ),
+        ),
+        data={
+            "type":    "quiz_ready",
+            "quiz_id": quiz_id,
+            "user_id": user_id,
+        },
+        token=fcm_token,
+    )
+    await _dispatch(msg, label=f"quiz_ready→{user_id[:8]}")
+
+
 async def send_welcome_push(fcm_token: str, name: str, is_signup: bool):
     """Send welcome push ~2s after login/signup."""
     await asyncio.sleep(2)

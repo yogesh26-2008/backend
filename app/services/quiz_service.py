@@ -11,6 +11,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config import settings
+from app.services.notification_service import send_quiz_ready_push, is_fcm_ready
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +295,26 @@ async def _run_generation(db: AsyncIOMotorDatabase, quiz_id: str, user_id: str, 
             {"$set": {"pending_quiz_id": quiz_id, "last_quiz_pattern": pattern}},
         )
         logger.info(f"[Quiz] Quiz {quiz_id} ready for user {user_id}")
+
+        # ── Send FCM data push so Flutter can navigate without polling ──────
+        if is_fcm_ready():
+            try:
+                user_doc = await db.users.find_one(
+                    {"_id": ObjectId(user_id)},
+                    {"fcm_token": 1},
+                )
+                fcm_token = user_doc.get("fcm_token") if user_doc else None
+                if fcm_token:
+                    asyncio.create_task(
+                        send_quiz_ready_push(
+                            fcm_token=fcm_token,
+                            quiz_id=quiz_id,
+                            user_id=user_id,
+                        )
+                    )
+                    logger.info(f"[Quiz] FCM quiz_ready queued for {user_id[:8]}")
+            except Exception as fcm_err:
+                logger.warning(f"[Quiz] FCM push failed (non-fatal): {fcm_err}")
 
     except Exception as e:
         logger.error(f"[Quiz] Generation failed for {quiz_id}: {e}")
