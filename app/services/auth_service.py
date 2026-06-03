@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import bcrypt as _bcrypt
 import httpx
 import base64
@@ -34,11 +34,11 @@ async def _build_auth_response(
     # Raw token is returned to client; hash is what we compare on refresh.
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_expire_days)
     await db.refresh_tokens.insert_one({
-        “token”: hash_refresh_token(refresh_token),
-        “user_id”: uid,
-        “created_at”: datetime.now(timezone.utc),
-        “expires_at”: expires_at,
-        “revoked”: False,
+        "token": hash_refresh_token(refresh_token),
+        "user_id": uid,
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": expires_at,
+        "revoked": False,
     })
 
     user = UserResponse(
@@ -86,13 +86,13 @@ async def _verify_firebase_token(token_str: str) -> dict:
     """
     Verify Firebase ID token.
     Strategy:
-      1. Try firebase_admin.auth.verify_id_token() â€” most secure (uses Google public keys)
+      1. Try firebase_admin.auth.verify_id_token() -- most secure (uses Google public keys)
       2. If firebase_admin not initialized, fall back to REST API
       3. If REST API fails, fall back to JWT payload decode (least secure but still checks email_verified)
     Returns dict with 'email' and 'email_verified' fields.
     """
 
-    # â”€â”€ Method 1: Firebase Admin SDK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Method 1: Firebase Admin SDK â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     if firebase_initialized:
         try:
             from firebase_admin import auth as fb_auth
@@ -108,7 +108,7 @@ async def _verify_firebase_token(token_str: str) -> dict:
             print(f"[AUTH] âš ï¸ Firebase Admin verify failed: {type(e).__name__}: {e}")
             # Fall through to next method
 
-    # â”€â”€ Method 2: Firebase REST API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Method 2: Firebase REST API â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -128,7 +128,7 @@ async def _verify_firebase_token(token_str: str) -> dict:
     except Exception as e:
         print(f"[AUTH] âš ï¸ Firebase REST API failed: {type(e).__name__}: {e}")
 
-    # â”€â”€ Method 3: JWT Payload Decode (fallback) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Method 3: JWT Payload Decode (fallback) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     print("[AUTH] âš ï¸ Using JWT payload decode fallback (no signature verification)")
     payload = _decode_firebase_jwt_payload(token_str)
     print(f"[AUTH] JWT payload: iss={payload.get('iss')} email={payload.get('email')} verified={payload.get('email_verified')}")
@@ -164,14 +164,14 @@ async def _verify_google_id_token(token_str: str) -> dict | None:
     return None
 
 
-# â”€â”€ Firebase Email Verification Signup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Firebase Email Verification Signup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def signup_with_firebase_verified_email(
     data: FirebaseSignupRequest, db: AsyncIOMotorDatabase
 ) -> AuthResponse:
     _require_db(db)
 
-    print(f"[AUTH] Signup attempt â€” name={data.name} username={data.username}")
+    print(f"[AUTH] Signup attempt -- name={data.name} username={data.username}")
 
     # Verify Firebase token (tries 3 methods)
     firebase_user = await _verify_firebase_token(data.firebase_id_token)
@@ -224,7 +224,7 @@ async def signup_with_firebase_verified_email(
     return await _build_auth_response(doc, "Account created successfully. Welcome to Trandia!", db)
 
 
-# â”€â”€ Email/Password Login â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Email/Password Login â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthResponse:
     _require_db(db)
@@ -251,7 +251,7 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     return await _build_auth_response(user, "Welcome back to Trandia!", db)
 
 
-# â”€â”€ Google Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Google Auth â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def auth_with_google_userinfo(
     userinfo: dict, fcm_token: Optional[str], db: AsyncIOMotorDatabase
@@ -333,7 +333,7 @@ async def cleanup_orphaned_firebase_user(
     """
     _require_db(db)
 
-    # If the email IS in MongoDB, it's a real account â€” don't touch it.
+    # If the email IS in MongoDB, it's a real account -- don't touch it.
     existing = await db.users.find_one({"email": email}, projection={"_id": 1})
     if existing:
         raise HTTPException(
@@ -341,7 +341,7 @@ async def cleanup_orphaned_firebase_user(
             detail="This email is already registered. Please sign in instead.",
         )
 
-    # Email NOT in MongoDB â†’ orphaned Firebase user. Delete it.
+    # Email NOT in MongoDB â†' orphaned Firebase user. Delete it.
     # Method 1: Firebase Admin SDK
     if firebase_initialized:
         try:
@@ -354,10 +354,10 @@ async def cleanup_orphaned_firebase_user(
             print(f"[AUTH] âš ï¸ Admin SDK cleanup failed: {type(e).__name__}: {e}")
             # Fall through to REST API
 
-    # Method 2: Firebase REST API â€” can't delete users, but we can confirm the orphan
+    # Method 2: Firebase REST API -- can't delete users, but we can confirm the orphan
     # Since REST API can't delete users without Admin SDK, we return a message
     # telling the client to proceed with a password reset flow or retry
-    print(f"[AUTH] ðŸ§¹ Email {email} not in MongoDB â€” orphaned Firebase user confirmed")
+    print(f"[AUTH] ðŸ§¹ Email {email} not in MongoDB -- orphaned Firebase user confirmed")
     return {"cleaned": False, "message": "Account not found in our system. Firebase Admin unavailable for cleanup."}
 
 
