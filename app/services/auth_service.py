@@ -14,7 +14,7 @@ from typing import Optional
 from bson import ObjectId
 from app.config import settings
 from app.models.user import UserLogin, UserResponse, AuthResponse, FirebaseSignupRequest
-from app.utils.jwt_handler import create_access_token, create_refresh_token
+from app.utils.jwt_handler import create_access_token, create_refresh_token, hash_refresh_token
 from app.utils.password import hash_password, verify_password
 from app.services.notification_service import schedule_welcome_notification, _initialized as firebase_initialized
 
@@ -30,16 +30,15 @@ async def _build_auth_response(
     access_token = create_access_token(uid, user_doc["email"])
     refresh_token = create_refresh_token()
 
-    # Store refresh token in MongoDB (with 7-day TTL).
-    # We keep the old tokens for this user valid â€” they get naturally superseded
-    # by the rotation on next /auth/refresh call.
+    # Store SHA-256 hash of refresh token in MongoDB (with 7-day TTL).
+    # Raw token is returned to client; hash is what we compare on refresh.
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_expire_days)
     await db.refresh_tokens.insert_one({
-        "token": refresh_token,
-        "user_id": uid,
-        "created_at": datetime.now(timezone.utc),
-        "expires_at": expires_at,
-        "revoked": False,
+        “token”: hash_refresh_token(refresh_token),
+        “user_id”: uid,
+        “created_at”: datetime.now(timezone.utc),
+        “expires_at”: expires_at,
+        “revoked”: False,
     })
 
     user = UserResponse(
@@ -390,9 +389,9 @@ async def refresh_access_token(
 
     now = datetime.now(timezone.utc)
 
-    # Look up token — must exist, not revoked, not expired
+    # Look up token by hash — must exist, not revoked, not expired
     token_doc = await db.refresh_tokens.find_one({
-        "token": refresh_token_str,
+        "token": hash_refresh_token(refresh_token_str),
         "revoked": False,
         "expires_at": {"$gt": now},
     })
@@ -435,7 +434,7 @@ async def revoke_refresh_token(refresh_token_str: str, db: AsyncIOMotorDatabase)
     if not refresh_token_str or db is None:
         return
     await db.refresh_tokens.update_one(
-        {"token": refresh_token_str},
+        {"token": hash_refresh_token(refresh_token_str)},
         {"$set": {"revoked": True, "revoked_at": datetime.now(timezone.utc)}}
     )
 

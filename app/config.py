@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 15
+    jwt_expire_minutes: int = 60
     jwt_refresh_expire_days: int = 7
 
     google_client_id: str

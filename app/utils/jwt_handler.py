@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -18,9 +19,15 @@ def create_access_token(user_id: str, email: str) -> str:
 def create_refresh_token() -> str:
     """
     Generate a cryptographically secure opaque refresh token (64 URL-safe chars).
-    Not a JWT — stored in MongoDB so it can be revoked at any time.
+    Not a JWT — stored in MongoDB (as SHA-256 hash) so it can be revoked at any time.
+    Returns the raw token; caller must hash before storing.
     """
     return secrets.token_urlsafe(48)
+
+
+def hash_refresh_token(raw_token: str) -> str:
+    """Return SHA-256 hex digest of a refresh token for safe DB storage."""
+    return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
 def decode_token(token: str) -> Optional[dict]:
