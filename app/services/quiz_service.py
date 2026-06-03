@@ -305,14 +305,15 @@ async def _run_generation(db: AsyncIOMotorDatabase, quiz_id: str, user_id: str, 
                 )
                 fcm_token = user_doc.get("fcm_token") if user_doc else None
                 if fcm_token:
-                    from app.task_queue import task_queue
-                    await task_queue.enqueue(
-                        send_quiz_ready_push,
-                        fcm_token=fcm_token,
-                        quiz_id=quiz_id,
-                        user_id=user_id,
+                    # FCM push: fire-and-forget, NO retry — duplicates unacceptable
+                    asyncio.create_task(
+                        send_quiz_ready_push(
+                            fcm_token=fcm_token,
+                            quiz_id=quiz_id,
+                            user_id=user_id,
+                        )
                     )
-                    logger.info(f"[Quiz] FCM quiz_ready queued for {user_id[:8]}")
+                    logger.info(f"[Quiz] FCM quiz_ready scheduled for {user_id[:8]}")
             except Exception as fcm_err:
                 logger.warning(f"[Quiz] FCM push failed (non-fatal): {fcm_err}")
 

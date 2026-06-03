@@ -675,14 +675,16 @@ async def follow_user(
         logger.warning(f"[FOLLOW] WS error: {ws_err}")
 
     if fcm_token and is_fcm_ready() and target_notif_master and target_notif_follows:
-        await task_queue.enqueue(
-            send_follow_push,
-            fcm_token=fcm_token,
-            follower_username=follower_username,
-            follower_name=follower_name,
-            notif_id=notif_id,
+        # FCM push: fire-and-forget, NO retry — duplicate notifications unacceptable
+        asyncio.create_task(
+            send_follow_push(
+                fcm_token=fcm_token,
+                follower_username=follower_username,
+                follower_name=follower_name,
+                notif_id=notif_id,
+            )
         )
-        logger.info(f"[FOLLOW] FCM task queued for {target_id}")
+        logger.info(f"[FOLLOW] FCM push scheduled for {target_id}")
     else:
         if not target_notif_master or not target_notif_follows:
             logger.info(f"[FOLLOW] 🔕 FCM skipped — {target_id} has follow notifications disabled")
@@ -761,10 +763,9 @@ async def get_followers(
         find_cursor = find_cursor.skip(skip)
     relations = await find_cursor.limit(limit).to_list(length=limit)
     follower_ids = [r["follower_id"] for r in relations]
-    next_cursor  = str(relations[-1]["_id"]) if len(relations) == limit else None
 
     if not follower_ids:
-        return {"users": [], "next_cursor": None}
+        return []
 
     follower_oids = []
     for fid in follower_ids:
@@ -783,20 +784,17 @@ async def get_followers(
     ).to_list(length=limit)
     following_set = {doc["following_id"] for doc in following_docs}
 
-    return {
-        "users": [
-            {
-                "id":           str(u["_id"]),
-                "name":         u["name"],
-                "username":     u["username"],
-                "picture":      u.get("picture"),
-                "public_key":   u.get("public_key"),
-                "is_following": str(u["_id"]) in following_set,
-            }
-            for u in users
-        ],
-        "next_cursor": next_cursor,
-    }
+    return [
+        {
+            "id":           str(u["_id"]),
+            "name":         u["name"],
+            "username":     u["username"],
+            "picture":      u.get("picture"),
+            "public_key":   u.get("public_key"),
+            "is_following": str(u["_id"]) in following_set,
+        }
+        for u in users
+    ]
 
 
 @router.get("/{user_id}/following")
@@ -822,10 +820,9 @@ async def get_following(
     relations = await find_cursor.limit(limit).to_list(length=limit)
 
     following_ids = [r["following_id"] for r in relations]
-    next_cursor   = str(relations[-1]["_id"]) if len(relations) == limit else None
 
     if not following_ids:
-        return {"users": [], "next_cursor": None}
+        return []
 
     following_oids = []
     for fid in following_ids:
@@ -844,17 +841,14 @@ async def get_following(
     ).to_list(length=limit)
     following_set = {doc["following_id"] for doc in following_docs}
 
-    return {
-        "users": [
-            {
-                "id":           str(u["_id"]),
-                "name":         u["name"],
-                "username":     u["username"],
-                "picture":      u.get("picture"),
-                "public_key":   u.get("public_key"),
-                "is_following": str(u["_id"]) in following_set,
-            }
-            for u in users
-        ],
-        "next_cursor": next_cursor,
-    }
+    return [
+        {
+            "id":           str(u["_id"]),
+            "name":         u["name"],
+            "username":     u["username"],
+            "picture":      u.get("picture"),
+            "public_key":   u.get("public_key"),
+            "is_following": str(u["_id"]) in following_set,
+        }
+        for u in users
+    ]

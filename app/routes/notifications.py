@@ -63,8 +63,6 @@ async def get_notifications(
         except Exception:
             pass
 
-    next_cursor = str(docs[-1]["_id"]) if len(docs) == limit else None
-
     result = []
     for d in docs:
         fuid = d.get("from_user_id") or ""
@@ -80,7 +78,7 @@ async def get_notifications(
             "created_at": d.get("created_at", ""),
         })
 
-    return {"notifications": result, "next_cursor": next_cursor}
+    return result
 
 
 @router.put("/read-all")

@@ -619,14 +619,15 @@ async def comment_notify(
     })
 
     if fcm_token and is_fcm_ready() and notif_master and notif_comments:
-        await task_queue.enqueue(
-            send_comment_push,
-            fcm_token=fcm_token,
-            commenter_name=commenter_name,
-            commenter_username=commenter_username,
-            post_id=post_id,
-            comment_text=body.comment_text,
-            notif_id=notif_id,
+        asyncio.create_task(
+            send_comment_push(
+                fcm_token=fcm_token,
+                commenter_name=commenter_name,
+                commenter_username=commenter_username,
+                post_id=post_id,
+                comment_text=body.comment_text,
+                notif_id=notif_id,
+            )
         )
 
     return {"ok": True, "new_count": new_count}
@@ -826,14 +827,15 @@ async def create_comment(
             })
 
             if fcm_token and is_fcm_ready() and notif_master and notif_comments:
-                await task_queue.enqueue(
-                    send_comment_push,
-                    fcm_token=fcm_token,
-                    commenter_name=commenter.get("name", ""),
-                    commenter_username=commenter.get("username", ""),
-                    post_id=post_id,
-                    comment_text=text,
-                    notif_id=notif_id,
+                asyncio.create_task(
+                    send_comment_push(
+                        fcm_token=fcm_token,
+                        commenter_name=commenter.get("name", ""),
+                        commenter_username=commenter.get("username", ""),
+                        post_id=post_id,
+                        comment_text=text,
+                        notif_id=notif_id,
+                    )
                 )
 
     return {
