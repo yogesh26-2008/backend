@@ -225,55 +225,59 @@ async def get_stories(
 ):
     now = datetime.now(timezone.utc)
 
-    # People this user follows
+    # ── Step 1: followees list (only IDs needed) ──────────────────────────────
     following_docs = await db.follows.find(
         {"follower_id": user_id}, {"following_id": 1, "_id": 0},
     ).to_list(length=2000)
-    following_ids = {d["following_id"] for d in following_docs}
+    following_ids = [d["following_id"] for d in following_docs]
 
-    # People who follow this user
-    follower_docs = await db.follows.find(
-        {"following_id": user_id}, {"follower_id": 1, "_id": 0},
-    ).to_list(length=2000)
-    follower_ids = {d["follower_id"] for d in follower_docs}
-    related_ids  = following_ids | follower_ids | {user_id}
+    # Visible authors = self + people I follow
+    visible_author_ids = list(set(following_ids) | {user_id})
 
-    # All active stories
+    # ── Step 2: fetch ONLY stories from visible authors — DB-level filter ─────
+    # hidden_from: exclude stories where current user is in the hidden list
     all_stories = await db.stories.find(
-        {"expires_at": {"$gt": now}},
+        {
+            "user_id":    {"$in": visible_author_ids},
+            "expires_at": {"$gt": now},
+            "hidden_from": {"$nin": [user_id]},   # stories hidden from me excluded
+        },
         projection={
             "_id": 1, "user_id": 1, "user_name": 1, "user_username": 1,
             "user_picture": 1, "media_url": 1, "public_id": 1,
             "expires_in_hours": 1, "expires_at": 1, "created_at": 1,
-            "view_count": 1, "viewers": 1, "hidden_from": 1,
+            "view_count": 1, "viewers": 1,
         },
-    ).sort("created_at", -1).to_list(length=1000)
+    ).sort("created_at", -1).to_list(length=500)
 
-    # Privacy map for all story authors
-    author_ids = list({s["user_id"] for s in all_stories})
-    author_privacy: dict = {}
-    if author_ids:
-        author_docs = await db.users.find(
-            {"_id": {"$in": [ObjectId(aid) for aid in author_ids]}},
-            {"_id": 1, "is_private": 1},
-        ).to_list(length=len(author_ids))
-        author_privacy = {str(d["_id"]): bool(d.get("is_private", False)) for d in author_docs}
+    if not all_stories:
+        return {"users": []}
 
-    # Filter by visibility and privacy
-    visible: list = []
-    for story in all_stories:
-        sid = story["user_id"]
-        if user_id in (story.get("hidden_from") or []):
-            continue
-        if sid == user_id:
-            visible.append(story)
-            continue
-        is_private = author_privacy.get(sid, False)
-        if is_private and sid not in related_ids:
-            continue
-        visible.append(story)
+    # ── Step 3: privacy filter (private accounts not in followees) ───────────
+    # Only check privacy for non-self stories
+    other_author_ids = list({s["user_id"] for s in all_stories if s["user_id"] != user_id})
+    following_set    = set(following_ids)
 
-    # Group by user
+    private_authors: set = set()
+    if other_author_ids:
+        privacy_docs = await db.users.find(
+            {
+                "_id":        {"$in": [ObjectId(aid) for aid in other_author_ids]},
+                "is_private": True,
+            },
+            {"_id": 1},
+        ).to_list(length=len(other_author_ids))
+        private_authors = {str(d["_id"]) for d in privacy_docs}
+
+    # Keep story only if: own story OR author is public OR I follow author
+    visible = [
+        s for s in all_stories
+        if s["user_id"] == user_id
+        or s["user_id"] not in private_authors
+        or s["user_id"] in following_set
+    ]
+
+    # ── Step 4: group by user ─────────────────────────────────────────────────
     grouped: dict = defaultdict(list)
     for story in visible:
         grouped[story["user_id"]].append(story)

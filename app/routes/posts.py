@@ -167,7 +167,40 @@ async def get_posts(
         if cached:
             return cached
 
+    # ── Build block list (both directions) ───────────────────────────────────
+    # Users blocked by me
+    blocked_by_me_docs = await db.blocks.find(
+        {"blocker_id": user_id}, {"blocked_id": 1, "_id": 0}
+    ).to_list(length=500)
+    blocked_by_me = {d["blocked_id"] for d in blocked_by_me_docs}
+
+    # Users who blocked me
+    blocked_me_docs = await db.blocks.find(
+        {"blocked_id": user_id}, {"blocker_id": 1, "_id": 0}
+    ).to_list(length=500)
+    blocked_me = {d["blocker_id"] for d in blocked_me_docs}
+
+    all_blocked = blocked_by_me | blocked_me
+
+    # ── Build followees list ──────────────────────────────────────────────────
+    followee_docs = await db.follows.find(
+        {"follower_id": user_id}, {"following_id": 1, "_id": 0}
+    ).to_list(length=2000)
+    followee_ids = [d["following_id"] for d in followee_docs]
+
+    # ── Feed query ────────────────────────────────────────────────────────────
     query: dict = {}
+
+    if followee_ids:
+        # Personalised: posts from self + people I follow, minus blocked
+        visible_ids = list({user_id} | set(followee_ids) - all_blocked)
+        query["user_id"] = {"$in": visible_ids}
+    else:
+        # Discovery fallback: recent posts from everyone, minus blocked
+        if all_blocked:
+            query["user_id"] = {"$nin": list(all_blocked)}
+
+    # Cursor-based pagination
     if cursor:
         try:
             query["_id"] = {"$lt": ObjectId(cursor)}

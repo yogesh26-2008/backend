@@ -133,6 +133,39 @@ async def _create_indexes():
         except Exception:
             pass
 
+        # ── Comments ──────────────────────────────────────────────────────────
+        # Primary: fetch top-level comments for a post (post_id + parent_id=null + _id sort)
+        await _db.comments.create_index(
+            [("post_id", ASCENDING), ("_id", ASCENDING)],
+            background=True,
+            name="comments_post_feed",
+        )
+        # Replies lookup: all replies for a set of parent_ids in one query
+        await _db.comments.create_index(
+            [("post_id", ASCENDING), ("parent_id", ASCENDING), ("_id", ASCENDING)],
+            background=True,
+            name="comments_replies",
+        )
+        # Author lookup: delete own comments, profile comment history
+        await _db.comments.create_index(
+            [("user_id", ASCENDING)],
+            background=True,
+            name="comments_user",
+        )
+
+        # ── Comment Likes ─────────────────────────────────────────────────────
+        await _db.comment_likes.create_index(
+            [("comment_id", ASCENDING), ("user_id", ASCENDING)],
+            unique=True,
+            background=True,
+            name="comment_likes_pair",
+        )
+        await _db.comment_likes.create_index(
+            [("user_id", ASCENDING), ("comment_id", ASCENDING)],
+            background=True,
+            name="comment_likes_user",
+        )
+
         # ── Post Likes ────────────────────────────────────────────────────────
         await _db.post_likes.create_index(
             [("post_id", ASCENDING), ("user_id", ASCENDING)],
