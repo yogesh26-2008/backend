@@ -251,12 +251,27 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Graceful shutdown
+    # Graceful shutdown — order matters
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
+
+    # Stop WebSocket Redis subscriber
+    from app.services.chat_service import manager as ws_manager
+    if ws_manager._subscriber_task and not ws_manager._subscriber_task.done():
+        ws_manager._subscriber_task.cancel()
+        try:
+            await ws_manager._subscriber_task
+        except asyncio.CancelledError:
+            pass
+    if ws_manager._pubsub:
+        try:
+            await ws_manager._pubsub.close()
+        except Exception:
+            pass
+
     await task_queue.stop()
     await close_redis()
     await close_db()

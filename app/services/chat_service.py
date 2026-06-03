@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional
 from fastapi import WebSocket
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -10,19 +11,110 @@ from app.database import get_db
 
 logger = logging.getLogger(__name__)
 
+# Redis channel prefix for WebSocket messages
+_WS_CHANNEL_PREFIX = "ws:msg:"
+
 
 class ConnectionManager:
-    def __init__(self):
-        # Maps user_id string to a list of active WebSockets (multi-tab support)
-        self.active_connections: Dict[str, List[WebSocket]] = {}
+    """
+    WebSocket connection manager with Redis Pub/Sub for horizontal scaling.
 
-    async def connect(self, websocket: WebSocket, user_id: str):
+    Architecture
+    ────────────
+    Each server instance maintains a local dict of connected WebSockets.
+    When sending to a user:
+      1. Try local delivery (O(1), zero network hop).
+      2. If user is not on this instance, publish to Redis channel
+         `ws:msg:{user_id}` — whichever instance holds that socket
+         will pick it up via its subscriber and deliver it.
+
+    Fallback: if Redis is unavailable, operates in local-only mode
+    (single-instance behaviour, identical to the original implementation).
+    """
+
+    def __init__(self) -> None:
+        # user_id → list of WebSockets (multi-tab / multi-device support)
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+        self._pubsub = None          # redis.asyncio PubSub object
+        self._subscriber_task: Optional[asyncio.Task] = None
+
+    # ── Redis subscriber lifecycle ────────────────────────────────────────────
+
+    async def _get_redis(self):
+        """Return the shared Redis client, or None if not configured."""
+        try:
+            from app.cache import _redis_client
+            return _redis_client
+        except Exception:
+            return None
+
+    async def _ensure_subscriber(self) -> None:
+        """
+        Start (or restart) the Redis pub/sub listener task.
+        Called on every new connect so the subscriber is always alive
+        as long as at least one user is connected.
+        """
+        if (
+            self._subscriber_task is not None
+            and not self._subscriber_task.done()
+        ):
+            return  # already running
+
+        redis = await self._get_redis()
+        if redis is None:
+            return  # Redis not configured — local-only mode
+
+        try:
+            self._pubsub = redis.pubsub()
+            self._subscriber_task = asyncio.create_task(
+                self._redis_listener(), name="ws-redis-subscriber"
+            )
+            logger.info("[WS] Redis pub/sub subscriber started.")
+        except Exception as e:
+            logger.warning(f"[WS] Could not start Redis subscriber: {e}")
+            self._pubsub = None
+
+    async def _redis_listener(self) -> None:
+        """
+        Background task: listens for messages on subscribed Redis channels
+        and delivers them to locally connected WebSockets.
+        """
+        if self._pubsub is None:
+            return
+        try:
+            async for raw in self._pubsub.listen():
+                if raw is None:
+                    continue
+                if raw.get("type") != "message":
+                    continue
+                channel: str = raw.get("channel", "")
+                data: str    = raw.get("data", "")
+                if not channel.startswith(_WS_CHANNEL_PREFIX):
+                    continue
+                user_id = channel[len(_WS_CHANNEL_PREFIX):]
+                await self._deliver_local(user_id, data)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[WS] Redis subscriber error: {e}")
+
+    # ── Core API ──────────────────────────────────────────────────────────────
+
+    async def connect(self, websocket: WebSocket, user_id: str) -> None:
         await websocket.accept()
         if user_id not in self.active_connections:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
 
-    def disconnect(self, websocket: WebSocket, user_id: str):
+        # Subscribe to this user's Redis channel so cross-instance messages arrive
+        await self._ensure_subscriber()
+        if self._pubsub is not None:
+            try:
+                await self._pubsub.subscribe(f"{_WS_CHANNEL_PREFIX}{user_id}")
+            except Exception as e:
+                logger.warning(f"[WS] Redis subscribe failed for {user_id}: {e}")
+
+    def disconnect(self, websocket: WebSocket, user_id: str) -> None:
         if user_id in self.active_connections:
             try:
                 self.active_connections[user_id].remove(websocket)
@@ -30,6 +122,18 @@ class ConnectionManager:
                 pass
             if not self.active_connections[user_id]:
                 del self.active_connections[user_id]
+                # Unsubscribe from Redis channel when last socket for this user closes
+                if self._pubsub is not None:
+                    asyncio.create_task(
+                        self._unsubscribe(f"{_WS_CHANNEL_PREFIX}{user_id}")
+                    )
+
+    async def _unsubscribe(self, channel: str) -> None:
+        try:
+            if self._pubsub is not None:
+                await self._pubsub.unsubscribe(channel)
+        except Exception as e:
+            logger.debug(f"[WS] Unsubscribe error for {channel}: {e}")
 
     def is_online(self, user_id: str) -> bool:
         return bool(self.active_connections.get(user_id))
@@ -37,19 +141,48 @@ class ConnectionManager:
     def get_online_of(self, user_ids: List[str]) -> List[str]:
         return [uid for uid in user_ids if self.is_online(uid)]
 
-    async def send_personal_message(self, message: str, user_id: str):
+    async def send_personal_message(self, message: str, user_id: str) -> None:
+        """
+        Deliver a message to a user.
+        - Local socket found  → send directly (fast path).
+        - No local socket     → publish to Redis (cross-instance delivery).
+        """
         if user_id in self.active_connections:
-            dead = []
-            for connection in self.active_connections[user_id]:
-                try:
-                    await connection.send_text(message)
-                except Exception:
-                    dead.append(connection)
-            for d in dead:
-                try:
-                    self.active_connections[user_id].remove(d)
-                except ValueError:
-                    pass
+            await self._deliver_local(user_id, message)
+        else:
+            await self._publish_redis(user_id, message)
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    async def _deliver_local(self, user_id: str, message: str) -> None:
+        """Send message to all local sockets for user_id; prune dead sockets."""
+        sockets = self.active_connections.get(user_id, [])
+        if not sockets:
+            return
+        dead: List[WebSocket] = []
+        for ws in sockets:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            try:
+                self.active_connections[user_id].remove(ws)
+            except ValueError:
+                pass
+        if not self.active_connections.get(user_id):
+            self.active_connections.pop(user_id, None)
+
+    async def _publish_redis(self, user_id: str, message: str) -> None:
+        """Publish message to Redis so another instance can deliver it."""
+        redis = await self._get_redis()
+        if redis is None:
+            return  # No Redis — silently drop (local-only mode)
+        try:
+            await redis.publish(f"{_WS_CHANNEL_PREFIX}{user_id}", message)
+        except Exception as e:
+            logger.warning(f"[WS] Redis publish failed for {user_id}: {e}")
+
 
 manager = ConnectionManager()
 
