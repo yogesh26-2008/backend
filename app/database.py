@@ -69,17 +69,19 @@ async def _create_indexes():
         )
 
         # ── Stories ───────────────────────────────────────────────────────────
-        # Variable TTL: expires_at is set to created_at + chosen duration (6/12/24h).
-        # MongoDB deletes the doc when expires_at is reached (expireAfterSeconds=0).
-        try:
-            await _db.stories.drop_index("stories_ttl_24h")
-        except Exception:
-            pass
+        # TTL index intentionally removed — cleanup job deletes Cloudinary assets
+        # first, then MongoDB docs. If MongoDB TTL ran first, Cloudinary assets
+        # would be orphaned forever. Drop any old TTL indexes.
+        for _old_ttl in ("stories_ttl_24h", "stories_ttl_expires"):
+            try:
+                await _db.stories.drop_index(_old_ttl)
+            except Exception:
+                pass
+        # Plain index on expires_at for efficient expiry queries (no auto-delete).
         await _db.stories.create_index(
             [("expires_at", ASCENDING)],
-            expireAfterSeconds=0,
             background=True,
-            name="stories_ttl_expires",
+            name="stories_expiry",
         )
         await _db.stories.create_index(
             [("user_id", ASCENDING), ("created_at", DESCENDING)],

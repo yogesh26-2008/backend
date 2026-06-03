@@ -70,7 +70,7 @@ async def _run_cleanup_once() -> int:
 
 
 async def story_cleanup_loop() -> None:
-    """Periodic task: cleans up expired stories every hour."""
+    """Periodic task: cleans up expired stories every 15 minutes."""
     # Small initial delay so startup is not blocked
     await asyncio.sleep(60)
     while True:
@@ -80,7 +80,7 @@ async def story_cleanup_loop() -> None:
             break
         except Exception as e:
             logger.error(f"[cleanup] Unexpected error: {e}")
-        await asyncio.sleep(3600)  # every hour
+        await asyncio.sleep(900)  # every 15 minutes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
