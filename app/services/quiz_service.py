@@ -348,7 +348,7 @@ async def trigger_quiz_generation(db: AsyncIOMotorDatabase, user_id: str, quiz_p
 # Watch Event Handler
 # ─────────────────────────────────────────────────────────────────────────────
 
-QUIZ_TRIGGER_COUNT  = 15   # quiz triggers after 15 unique learn videos
+QUIZ_TRIGGER_COUNT  = 5    # quiz triggers after 5 unique learn videos
 POOL_THRESHOLD_PCT  = 65   # 65%+ watch adds video to quiz pool
 COUNT_THRESHOLD_PCT = 35   # 35%+ watch increments learn_view_count
 MIN_WATCH_SECONDS   = 2    # 2s floor (bot prevention only — real guard is % threshold)
