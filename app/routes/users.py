@@ -14,6 +14,7 @@ from app.database import get_db
 from app.limiter import limiter
 from app.services.notification_service import send_follow_push, is_fcm_ready
 from app.utils.jwt_handler import get_current_user_id
+from app.task_queue import task_queue
 
 logger = logging.getLogger(__name__)
 
@@ -429,11 +430,12 @@ async def search_users(
 
     exclude_oids = [ObjectId(uid) for uid in hidden_ids]
 
+    # Prefix-anchored regex — MongoDB can use the username index (IXSCAN not COLLSCAN)
     cursor = db.users.find({
         "$and": [
             {"_id": {"$ne": ObjectId(user_id)}},
             {"_id": {"$nin": exclude_oids}},
-            {"username": {"$regex": escaped_q, "$options": "i"}},
+            {"username": {"$regex": "^" + escaped_q, "$options": "i"}},
         ]
     }).limit(20)
     users = await cursor.to_list(length=20)
@@ -671,15 +673,14 @@ async def follow_user(
         logger.warning(f"[FOLLOW] WS error: {ws_err}")
 
     if fcm_token and is_fcm_ready() and target_notif_master and target_notif_follows:
-        asyncio.create_task(
-            send_follow_push(
-                fcm_token=fcm_token,
-                follower_username=follower_username,
-                follower_name=follower_name,
-                notif_id=notif_id,
-            )
+        await task_queue.enqueue(
+            send_follow_push,
+            fcm_token=fcm_token,
+            follower_username=follower_username,
+            follower_name=follower_name,
+            notif_id=notif_id,
         )
-        logger.info(f"[FOLLOW] 📲 FCM task scheduled for {target_id}")
+        logger.info(f"[FOLLOW] FCM task queued for {target_id}")
     else:
         if not target_notif_master or not target_notif_follows:
             logger.info(f"[FOLLOW] 🔕 FCM skipped — {target_id} has follow notifications disabled")
@@ -739,19 +740,29 @@ async def get_follow_status(
 @router.get("/{user_id}/followers")
 async def get_followers(
     user_id: str,
-    skip: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None, description="Last seen follow _id for cursor pagination"),
+    skip: int = Query(0, ge=0, description="Deprecated — use cursor instead"),
     limit: int = Query(20, ge=1, le=100),
     current_user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    # Find paginated follow relations where target is user_id
-    relations = await db.follows.find(
-        {"following_id": user_id}
-    ).skip(skip).limit(limit).to_list(length=limit)
+    # Cursor-based pagination (preferred) — falls back to skip for old clients
+    follow_query: dict = {"following_id": user_id}
+    if cursor:
+        try:
+            follow_query["_id"] = {"$lt": ObjectId(cursor)}
+        except Exception:
+            pass
+
+    find_cursor = db.follows.find(follow_query).sort("_id", -1)
+    if not cursor:
+        find_cursor = find_cursor.skip(skip)
+    relations = await find_cursor.limit(limit).to_list(length=limit)
     follower_ids = [r["follower_id"] for r in relations]
+    next_cursor  = str(relations[-1]["_id"]) if len(relations) == limit else None
 
     if not follower_ids:
-        return []
+        return {"users": [], "next_cursor": None}
 
     follower_oids = []
     for fid in follower_ids:
@@ -770,35 +781,49 @@ async def get_followers(
     ).to_list(length=limit)
     following_set = {doc["following_id"] for doc in following_docs}
 
-    return [
-        {
-            "id":          str(u["_id"]),
-            "name":        u["name"],
-            "username":    u["username"],
-            "picture":     u.get("picture"),
-            "public_key":  u.get("public_key"),
-            "is_following": str(u["_id"]) in following_set,
-        }
-        for u in users
-    ]
+    return {
+        "users": [
+            {
+                "id":           str(u["_id"]),
+                "name":         u["name"],
+                "username":     u["username"],
+                "picture":      u.get("picture"),
+                "public_key":   u.get("public_key"),
+                "is_following": str(u["_id"]) in following_set,
+            }
+            for u in users
+        ],
+        "next_cursor": next_cursor,
+    }
 
 
 @router.get("/{user_id}/following")
 async def get_following(
     user_id: str,
-    skip: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None, description="Last seen follow _id for cursor pagination"),
+    skip: int = Query(0, ge=0, description="Deprecated — use cursor instead"),
     limit: int = Query(20, ge=1, le=100),
     current_user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    # Find paginated follow relations where follower is user_id
-    relations = await db.follows.find(
-        {"follower_id": user_id}
-    ).skip(skip).limit(limit).to_list(length=limit)
+    # Cursor-based pagination (preferred) — falls back to skip for old clients
+    follow_query: dict = {"follower_id": user_id}
+    if cursor:
+        try:
+            follow_query["_id"] = {"$lt": ObjectId(cursor)}
+        except Exception:
+            pass
+
+    find_cursor = db.follows.find(follow_query).sort("_id", -1)
+    if not cursor:
+        find_cursor = find_cursor.skip(skip)
+    relations = await find_cursor.limit(limit).to_list(length=limit)
+
     following_ids = [r["following_id"] for r in relations]
+    next_cursor   = str(relations[-1]["_id"]) if len(relations) == limit else None
 
     if not following_ids:
-        return []
+        return {"users": [], "next_cursor": None}
 
     following_oids = []
     for fid in following_ids:
@@ -817,14 +842,17 @@ async def get_following(
     ).to_list(length=limit)
     following_set = {doc["following_id"] for doc in following_docs}
 
-    return [
-        {
-            "id":          str(u["_id"]),
-            "name":        u["name"],
-            "username":    u["username"],
-            "picture":     u.get("picture"),
-            "public_key":  u.get("public_key"),
-            "is_following": str(u["_id"]) in following_set,
-        }
-        for u in users
-    ]
+    return {
+        "users": [
+            {
+                "id":           str(u["_id"]),
+                "name":         u["name"],
+                "username":     u["username"],
+                "picture":      u.get("picture"),
+                "public_key":   u.get("public_key"),
+                "is_following": str(u["_id"]) in following_set,
+            }
+            for u in users
+        ],
+        "next_cursor": next_cursor,
+    }

@@ -14,6 +14,7 @@ from app.utils.jwt_handler import get_current_user_id
 from app.services.notification_service import send_like_push, send_comment_push, is_fcm_ready
 from app.cache import get_cache, set_cache, delete_cache, delete_cache_pattern
 from app.utils.cloudinary_transform import optimize_image, optimize_thumbnail, optimize_video
+from app.task_queue import task_queue
 
 # TTL constants (seconds)
 _FEED_TTL   = 300  # home feed first page (5 min)
@@ -399,7 +400,7 @@ async def like_post(
     )
     if res.upserted_id:
         await db.posts.update_one({"_id": oid}, {"$inc": {"likes_count": 1}})
-        asyncio.create_task(_send_like_notification(db, post_id, user_id))
+        await task_queue.enqueue(_send_like_notification, db, post_id, user_id)
     return {"liked": True}
 
 
@@ -615,15 +616,14 @@ async def comment_notify(
     })
 
     if fcm_token and is_fcm_ready() and notif_master and notif_comments:
-        asyncio.create_task(
-            send_comment_push(
-                fcm_token=fcm_token,
-                commenter_name=commenter_name,
-                commenter_username=commenter_username,
-                post_id=post_id,
-                comment_text=body.comment_text,
-                notif_id=notif_id,
-            )
+        await task_queue.enqueue(
+            send_comment_push,
+            fcm_token=fcm_token,
+            commenter_name=commenter_name,
+            commenter_username=commenter_username,
+            post_id=post_id,
+            comment_text=body.comment_text,
+            notif_id=notif_id,
         )
 
     return {"ok": True, "new_count": new_count}
@@ -666,9 +666,9 @@ async def delete_post(
         db.notifications.delete_many({"post_id": post_id}),
     )
 
-    # Delete from Cloudinary (fire-and-forget — don't block response)
+    # Delete from Cloudinary (queued with retry — don't block response)
     if public_id:
-        asyncio.create_task(_delete_from_cloudinary(public_id, media_type))
+        await task_queue.enqueue(_delete_from_cloudinary, public_id, media_type)
 
     # Invalidate feed / shots cache
     await delete_cache_pattern(f"feed:u:{user_id}:*")
@@ -823,15 +823,14 @@ async def create_comment(
             })
 
             if fcm_token and is_fcm_ready() and notif_master and notif_comments:
-                asyncio.create_task(
-                    send_comment_push(
-                        fcm_token=fcm_token,
-                        commenter_name=commenter.get("name", ""),
-                        commenter_username=commenter.get("username", ""),
-                        post_id=post_id,
-                        comment_text=text,
-                        notif_id=notif_id,
-                    )
+                await task_queue.enqueue(
+                    send_comment_push,
+                    fcm_token=fcm_token,
+                    commenter_name=commenter.get("name", ""),
+                    commenter_username=commenter.get("username", ""),
+                    post_id=post_id,
+                    comment_text=text,
+                    notif_id=notif_id,
                 )
 
     return {

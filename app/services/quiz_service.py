@@ -305,12 +305,12 @@ async def _run_generation(db: AsyncIOMotorDatabase, quiz_id: str, user_id: str, 
                 )
                 fcm_token = user_doc.get("fcm_token") if user_doc else None
                 if fcm_token:
-                    asyncio.create_task(
-                        send_quiz_ready_push(
-                            fcm_token=fcm_token,
-                            quiz_id=quiz_id,
-                            user_id=user_id,
-                        )
+                    from app.task_queue import task_queue
+                    await task_queue.enqueue(
+                        send_quiz_ready_push,
+                        fcm_token=fcm_token,
+                        quiz_id=quiz_id,
+                        user_id=user_id,
                     )
                     logger.info(f"[Quiz] FCM quiz_ready queued for {user_id[:8]}")
             except Exception as fcm_err:
@@ -338,7 +338,8 @@ async def trigger_quiz_generation(db: AsyncIOMotorDatabase, user_id: str, quiz_p
         "attempt_result": None,
     })
 
-    asyncio.create_task(_run_generation(db, quiz_id, user_id, quiz_pool, pattern))
+    from app.task_queue import task_queue
+    await task_queue.enqueue(_run_generation, db, quiz_id, user_id, quiz_pool, pattern)
     return quiz_id
 
 

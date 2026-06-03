@@ -269,9 +269,24 @@ async def save_message(
     reply_to_id: Optional[str] = None,
     reply_to_text: Optional[str] = None,
 ):
-    """Save a message and atomically increment unread counts."""
+    """
+    Save a message and atomically increment unread counts.
+
+    E2E Privacy contract
+    --------------------
+    When encrypted_aes_keys is present (non-empty dict), the Flutter client
+    has already encrypted `text` with a per-message AES key before sending.
+    The server MUST NOT log or expose the raw `text` field in that case.
+    The conversation preview (last_message) is stored as '[Encrypted message]'
+    so the server never holds a readable plaintext copy.
+    """
+    if not text or not text.strip():
+        raise ValueError("Message text cannot be empty")
     if len(text) > 10000:
         raise ValueError("Message too long (max 10000 characters)")
+
+    # Detect whether this message is E2E-encrypted
+    is_encrypted = bool(encrypted_aes_keys)
 
     # Verify conversation exists and user is participant
     conv = await db.conversations.find_one({
@@ -297,7 +312,7 @@ async def save_message(
     new_message = {
         "conversation_id": conversation_id,
         "sender_id": sender_id,
-        "text": text,
+        "text": text,                          # ciphertext when is_encrypted=True
         "created_at": now,
         "read_by": [sender_id],
         "encrypted_aes_keys": encrypted_aes_keys or {},
@@ -308,6 +323,13 @@ async def save_message(
     result = await db.messages.insert_one(new_message)
     msg_id = str(result.inserted_id)
 
+    # Privacy: never store plaintext preview when message is E2E-encrypted.
+    # If not encrypted, store a short preview (first 100 chars only).
+    if is_encrypted:
+        last_message_preview = "[Encrypted message]"
+    else:
+        last_message_preview = text[:100]
+
     inc_fields = {
         f"unread_counts.{pid}": 1
         for pid in conv["participants"]
@@ -316,7 +338,7 @@ async def save_message(
 
     update_doc: dict = {
         "$set": {
-            "last_message": text,
+            "last_message": last_message_preview,
             "last_message_time": now,
             "last_message_encrypted_aes_keys": encrypted_aes_keys or {},
         }
@@ -327,6 +349,12 @@ async def save_message(
     await db.conversations.update_one(
         {"_id": ObjectId(conversation_id)},
         update_doc
+    )
+
+    # NEVER log message text — it may be sensitive plaintext or ciphertext
+    logger.info(
+        f"[CHAT] msg saved conv={conversation_id} sender={sender_id} "
+        f"encrypted={is_encrypted} len={len(text)}"
     )
 
     # Invalidate Redis caches for this conversation and all participants

@@ -9,6 +9,7 @@ REST endpoints for the in-app notification feed.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Optional
 from app.database import get_db
 from app.utils.jwt_handler import get_current_user_id
 from bson import ObjectId
@@ -23,20 +24,26 @@ router = APIRouter()
 
 @router.get("")
 async def get_notifications(
-    skip: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None, description="Last seen notification _id for cursor pagination"),
+    skip: int = Query(0, ge=0, description="Deprecated — use cursor instead"),
     limit: int = Query(40, ge=1, le=100),
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    """Return notifications for the current user, newest first."""
-    cursor = (
-        db.notifications
-        .find({"recipient_id": user_id})
-        .sort("created_at", -1)
-        .skip(skip)
-        .limit(limit)
-    )
-    docs = await cursor.to_list(length=limit)
+    """Return notifications for the current user, newest first (cursor-paginated)."""
+    query: dict = {"recipient_id": user_id}
+    if cursor:
+        try:
+            query["_id"] = {"$lt": ObjectId(cursor)}
+        except Exception:
+            pass  # bad cursor — ignore and fetch from start
+
+    find_cursor = db.notifications.find(query).sort("_id", -1)
+    if not cursor:
+        # Legacy skip-based fallback for old clients
+        find_cursor = find_cursor.skip(skip)
+    find_cursor = find_cursor.limit(limit)
+    docs = await find_cursor.to_list(length=limit)
 
     # Collect unique sender IDs so we can batch-fetch their pictures
     sender_ids = list({
@@ -56,6 +63,8 @@ async def get_notifications(
         except Exception:
             pass
 
+    next_cursor = str(docs[-1]["_id"]) if len(docs) == limit else None
+
     result = []
     for d in docs:
         fuid = d.get("from_user_id") or ""
@@ -71,7 +80,7 @@ async def get_notifications(
             "created_at": d.get("created_at", ""),
         })
 
-    return result
+    return {"notifications": result, "next_cursor": next_cursor}
 
 
 @router.put("/read-all")

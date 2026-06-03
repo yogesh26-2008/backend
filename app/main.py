@@ -24,6 +24,7 @@ from app.routes import stories as stories_router
 from app.routes import share as share_module
 from app.routes import quiz as quiz_router
 from app.routes.stories import story_cleanup_loop
+from app.task_queue import task_queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -242,16 +243,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[STARTUP] Redis init error: {e}")
 
-    # Start story expiry cleanup (runs every hour)
+    # Start background task queue (retry-safe fire-and-forget)
+    task_queue.start()
+
+    # Start story expiry cleanup (runs every 15 minutes)
     cleanup_task = asyncio.create_task(story_cleanup_loop())
 
     yield
 
+    # Graceful shutdown
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
+    await task_queue.stop()
     await close_redis()
     await close_db()
 

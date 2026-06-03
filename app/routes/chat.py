@@ -9,6 +9,7 @@ from bson.errors import InvalidId
 
 from app.database import get_db
 from app.utils.jwt_handler import get_current_user_id, decode_token
+from app.task_queue import task_queue
 from app.models.chat import ConversationResponse, MessageResponse, ConversationCreate
 from app.services.chat_service import (
     manager,
@@ -298,14 +299,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     for pid in participants:
                         await manager.send_personal_message(broadcast, pid)
 
-                    asyncio.create_task(
-                        _push_to_eligible_recipients(
-                            sender_id=user_id,
-                            sender_username=sender_username,
-                            conversation_id=conv_id,
-                            participant_ids=participants,
-                            db=db,
-                        )
+                    await task_queue.enqueue(
+                        _push_to_eligible_recipients,
+                        sender_id=user_id,
+                        sender_username=sender_username,
+                        conversation_id=conv_id,
+                        participant_ids=participants,
+                        db=db,
                     )
 
                 # ── Typing indicator ──────────────────────────
