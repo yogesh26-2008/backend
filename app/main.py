@@ -223,25 +223,25 @@ async def lifespan(app: FastAPI):
     try:
         await connect_db()
     except Exception as e:
-        print(f"[STARTUP] DB init error: {e}")
+        logger.error(f"[STARTUP] DB init error: {e}")
     try:
         init_firebase(settings.firebase_credentials_path)
     except Exception as e:
-        print(f"[STARTUP] Firebase init error: {e}")
+        logger.error(f"[STARTUP] Firebase init error: {e}")
     try:
         if settings.cloudinary_cloud_name:
             init_media_provider(settings)
         else:
-            print("[STARTUP] Cloudinary not configured — set CLOUDINARY_* vars in .env")
+            logger.warning("[STARTUP] Cloudinary not configured — set CLOUDINARY_* env vars")
     except Exception as e:
-        print(f"[STARTUP] Media provider init error: {e}")
+        logger.error(f"[STARTUP] Media provider init error: {e}")
     try:
         if settings.redis_url:
             await init_redis(settings.redis_url)
         else:
-            print("[STARTUP] REDIS_URL not set — caching disabled (set in Railway env vars)")
+            logger.warning("[STARTUP] REDIS_URL not set — caching disabled")
     except Exception as e:
-        print(f"[STARTUP] Redis init error: {e}")
+        logger.error(f"[STARTUP] Redis init error: {e}")
 
     # Start background task queue (retry-safe fire-and-forget)
     task_queue.start()
@@ -286,13 +286,36 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ALLOWED_ORIGINS - Allow all origins for mobile app access
-ALLOWED_ORIGINS = ["*"]
+# ── CORS ─────────────────────────────────────────────────────────────────────
+# Production origins are explicit; localhost is added only in development.
+# NEVER use allow_origins=["*"] with allow_credentials=True — browsers block it.
+# Mobile apps (Flutter) don't send an Origin header, so they are unaffected by
+# CORS restrictions — this only protects against rogue web-browser clients.
+_PRODUCTION_ORIGINS = [
+    "https://trandia.app",
+    "https://www.trandia.app",
+    "https://trandia.railway.app",
+]
+
+# Add localhost variants when ENV != production (safe for dev/staging)
+_ENV = (settings.allowed_origins or "").strip().lower()
+if _ENV and _ENV not in ("production", "prod"):
+    _PRODUCTION_ORIGINS += [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://localhost:5173",
+    ]
+elif settings.allowed_origins:
+    # Allow extra origins from env var (comma-separated)
+    for _o in settings.allowed_origins.split(","):
+        _o = _o.strip()
+        if _o and _o not in _PRODUCTION_ORIGINS:
+            _PRODUCTION_ORIGINS.append(_o)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,  # Cannot use credentials with wildcard origins
+    allow_origins=_PRODUCTION_ORIGINS,
+    allow_credentials=False,   # cookies/credentials not used — keep False
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
     max_age=3600,

@@ -324,7 +324,9 @@ async def get_stories(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{story_id}/view")
+@limiter.limit("120/minute")
 async def view_story(
+    request:  Request,
     story_id: str,
     user_id:  str = Depends(get_current_user_id),
     db        = Depends(get_db),

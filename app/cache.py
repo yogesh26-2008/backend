@@ -1,3 +1,6 @@
+import logging
+
+logger = logging.getLogger(__name__)
 import json
 from typing import Optional
 import redis.asyncio as redis
@@ -13,9 +16,9 @@ async def init_redis(redis_url: str = "redis://localhost:6379"):
     try:
         _redis_client = await redis.from_url(redis_url, decode_responses=True)
         await _redis_client.ping()
-        print("[CACHE] ✅ Connected to Redis")
+        logger.info("[CACHE] Connected to Redis")
     except Exception as e:
-        print(f"[CACHE] ❌ Could not connect to Redis: {e}")
+        logger.error(f"[CACHE] Could not connect to Redis: {e}")
         _redis_client = None
 
 
@@ -24,7 +27,7 @@ async def close_redis():
     global _redis_client
     if _redis_client:
         await _redis_client.close()
-        print("[CACHE] Redis connection closed")
+        logger.info("[CACHE] Redis connection closed")
 
 
 async def get_cache(key: str) -> Optional[dict]:

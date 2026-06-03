@@ -1,3 +1,6 @@
+import logging
+
+logger = logging.getLogger(__name__)
 import certifi
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ASCENDING, DESCENDING
@@ -22,9 +25,9 @@ async def connect_db():
     _db = _client[settings.mongodb_db]
     try:
         await _client.admin.command("ping")
-        print(f"[DB] ✅ Connected to MongoDB — database: {settings.mongodb_db}")
+        logger.info(f"[DB] Connected to MongoDB — database: {settings.mongodb_db}")
     except Exception as e:
-        print(f"[DB] ❌ Could not connect — {e}")
+        logger.error(f"[DB] Could not connect: {e}")
         return
     await _create_indexes()
 
@@ -129,7 +132,7 @@ async def _create_indexes():
         )
         try:
             await _db.notifications.drop_index("notifications_ttl_30d")
-            print("[DB] Removed notifications TTL index; notifications now persist until deleted.")
+            logger.info("[DB] Removed notifications TTL index.")
         except Exception:
             pass
 
@@ -234,16 +237,16 @@ async def _create_indexes():
             [("video_id", ASCENDING)], unique=True, background=True, name="transcript_cache_video_id"
         )
 
-        print("[DB] ✅ All indexes verified.")
+        logger.info("[DB] All indexes verified.")
     except Exception as e:
-        print(f"[DB] ⚠️  Index creation warning: {e}")
+        logger.warning(f"[DB] Index creation warning: {e}")
 
 
 async def close_db():
     global _client
     if _client:
         _client.close()
-        print("[DB] MongoDB connection closed")
+        logger.info("[DB] MongoDB connection closed")
 
 
 def get_db() -> AsyncIOMotorDatabase:

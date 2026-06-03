@@ -259,13 +259,58 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     # Broadcast online presence to conversation partners
     asyncio.create_task(broadcast_presence(user_id, True, db))
 
+    _PING_INTERVAL = 30   # send ping every 30 seconds
+    _PONG_TIMEOUT  = 10   # wait 10 seconds for pong before closing
+
+    async def _receive_with_heartbeat() -> str:
+        """
+        Wait for a client message.
+        Every _PING_INTERVAL seconds of silence, send a ping and expect
+        a pong within _PONG_TIMEOUT seconds — else close the dead socket.
+        """
+        while True:
+            try:
+                # Wait up to PING_INTERVAL for any incoming message
+                raw = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=_PING_INTERVAL,
+                )
+                return raw
+            except asyncio.TimeoutError:
+                # No message in PING_INTERVAL seconds — send a ping
+                try:
+                    await websocket.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    raise WebSocketDisconnect(code=1001)
+                # Wait for pong (or any message) within PONG_TIMEOUT
+                try:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=_PONG_TIMEOUT,
+                    )
+                    # If client sent pong, loop again; otherwise return the message
+                    try:
+                        if json.loads(raw).get("type") == "pong":
+                            continue   # heartbeat OK — wait for next real message
+                    except Exception:
+                        pass
+                    return raw
+                except asyncio.TimeoutError:
+                    logger.warning(f"[WS] Heartbeat timeout — closing dead socket for {user_id}")
+                    raise WebSocketDisconnect(code=1001)
+
     try:
         while True:
-            raw = await websocket.receive_text()
+            raw = await _receive_with_heartbeat()
             try:
                 data       = json.loads(raw)
                 event_type = data.get("type")
                 conv_id    = data.get("conversation_id", "")
+
+                # ── Pong (client-initiated heartbeat response) ────────────────
+                if event_type == "pong":
+                    continue   # already handled inside _receive_with_heartbeat,
+                                # but guard here too for safety
 
                 # ── Send message ──────────────────────────────
                 if event_type == "message":

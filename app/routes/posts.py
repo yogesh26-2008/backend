@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 async def _send_like_notification(db, post_id: str, liker_id: str):
     """Fetch all needed data and dispatch FCM + DB notification for a like."""
-    print(f"[LIKE] 🔔 _send_like_notification called — post={post_id} liker={liker_id}")
+    logger.debug("[LIKE] _send_like_notification called")
     try:
         post, liker = await asyncio.gather(
             db.posts.find_one({"_id": ObjectId(post_id)}, {"user_id": 1}),
@@ -38,17 +38,17 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
         )
 
         if not post:
-            print(f"[LIKE] ❌ post not found: {post_id}")
+            logger.warning("[LIKE] post not found")
             return
         if not liker:
-            print(f"[LIKE] ❌ liker not found: {liker_id}")
+            logger.warning("[LIKE] liker not found")
             return
 
         owner_id = post.get("user_id", "")
-        print(f"[LIKE] owner_id={owner_id}  liker_id={liker_id}")
+        logger.debug("[LIKE] owner and liker resolved")
 
         if str(owner_id) == str(liker_id):
-            print(f"[LIKE] ⏭ self-like skipped")
+            logger.debug("[LIKE] self-like skipped")
             return
 
         owner = await db.users.find_one(
@@ -56,7 +56,7 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
             {"fcm_token": 1, "notification_settings": 1},
         )
         if not owner:
-            print(f"[LIKE] ❌ owner user not found: {owner_id}")
+            logger.warning("[LIKE] owner user not found")
             return
 
         liker_name     = liker.get("name", "") or ""
@@ -66,8 +66,7 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
         notif_master   = _ns.get("master", True)
         notif_likes    = _ns.get("likes",  True)
 
-        print(f"[LIKE] liker={liker_username!r}  fcm={'✓' if fcm_token else '✗ MISSING'}  "
-              f"fcm_ready={is_fcm_ready()}  master={notif_master}  likes={notif_likes}")
+        logger.debug(f"[LIKE] fcm_ready={is_fcm_ready()} master={notif_master} likes={notif_likes}")
 
         notif_id = str(ObjectId())
         now      = datetime.now(timezone.utc)
@@ -84,16 +83,16 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
             "read":          False,
             "created_at":    now,
         })
-        print(f"[LIKE] ✅ notification saved id={notif_id}")
+        logger.info("[LIKE] notification saved")
 
         if not fcm_token:
-            print(f"[LIKE] ⚠️  owner has no FCM token — push skipped")
+            logger.debug("[LIKE] owner has no FCM token — push skipped")
             return
         if not is_fcm_ready():
-            print(f"[LIKE] ⚠️  Firebase not initialized — push skipped")
+            logger.debug("[LIKE] Firebase not initialized — push skipped")
             return
         if not notif_master or not notif_likes:
-            print(f"[LIKE] ⚠️  notifications disabled by owner — push skipped")
+            logger.debug("[LIKE] notifications disabled — push skipped")
             return
 
         asyncio.create_task(
@@ -105,11 +104,11 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
                 notif_id=notif_id,
             )
         )
-        print(f"[LIKE] 📲 FCM task scheduled → owner={owner_id}")
+        logger.info("[LIKE] FCM push queued")
 
     except Exception as e:
         import traceback
-        print(f"[LIKE] ❌ notification error: {e}\n{traceback.format_exc()}")
+        logger.error(f"[LIKE] notification error: {e}", exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,7 +378,9 @@ async def get_shots_feed(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{post_id}/like")
+@limiter.limit("60/minute")
 async def like_post(
+    request: Request,
     post_id: str,
     user_id: str = Depends(get_current_user_id),
     db           = Depends(get_db),
@@ -405,7 +406,9 @@ async def like_post(
 
 
 @router.delete("/{post_id}/like")
+@limiter.limit("60/minute")
 async def unlike_post(
+    request: Request,
     post_id: str,
     user_id: str = Depends(get_current_user_id),
     db           = Depends(get_db),

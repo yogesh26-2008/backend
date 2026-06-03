@@ -6,8 +6,6 @@ import json as json_lib
 import logging
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
-
-logger = logging.getLogger(__name__)
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 from google.oauth2 import id_token
@@ -20,6 +18,8 @@ from app.models.user import UserLogin, UserResponse, AuthResponse, FirebaseSignu
 from app.utils.jwt_handler import create_access_token, create_refresh_token, hash_refresh_token
 from app.utils.password import hash_password, verify_password
 from app.services.notification_service import schedule_welcome_notification, _initialized as firebase_initialized
+
+logger = logging.getLogger(__name__)
 
 # Valid bcrypt hash used only for timing equalization (prevents user-enumeration via
 # response-time differences). Computed once at startup with cost 4 so it adds ~5 ms.
@@ -158,7 +158,7 @@ async def signup_with_firebase_verified_email(
 ) -> AuthResponse:
     _require_db(db)
 
-    print(f"[AUTH] Signup attempt -- name={data.name} username={data.username}")
+    logger.info("[AUTH] Signup attempt received")
 
     # Verify Firebase token (tries 3 methods)
     firebase_user = await _verify_firebase_token(data.firebase_id_token)
@@ -173,7 +173,7 @@ async def signup_with_firebase_verified_email(
     if not email:
         raise HTTPException(status_code=400, detail="Could not extract email from token")
 
-    print(f"[AUTH] Email verified: {email}")
+    logger.info("[AUTH] Firebase email verified")
 
     # Check duplicates
     if await db.users.find_one({"email": email}):
@@ -206,7 +206,7 @@ async def signup_with_firebase_verified_email(
         )
 
     doc["_id"] = result.inserted_id
-    print(f"[AUTH] âœ… Account created: {email}")
+    logger.info("[AUTH] Account created successfully")
     schedule_welcome_notification(data.fcm_token, data.name, is_signup=True)
     return await _build_auth_response(doc, "Account created successfully. Welcome to Trandia!", db)
 
@@ -335,7 +335,7 @@ async def cleanup_orphaned_firebase_user(
             from firebase_admin import auth as fb_auth
             fb_user = await asyncio.to_thread(fb_auth.get_user_by_email, email)
             await asyncio.to_thread(fb_auth.delete_user, fb_user.uid)
-            print(f"[AUTH] ðŸ§¹ Orphaned Firebase user deleted (Admin SDK): {email}")
+            logger.info("[AUTH] Orphaned Firebase user cleaned up")
             return {"cleaned": True, "message": "Orphaned account cleaned up. Please sign up again."}
         except Exception as e:
             print(f"[AUTH] âš ï¸ Admin SDK cleanup failed: {type(e).__name__}: {e}")
@@ -344,7 +344,7 @@ async def cleanup_orphaned_firebase_user(
     # Method 2: Firebase REST API -- can't delete users, but we can confirm the orphan
     # Since REST API can't delete users without Admin SDK, we return a message
     # telling the client to proceed with a password reset flow or retry
-    print(f"[AUTH] ðŸ§¹ Email {email} not in MongoDB -- orphaned Firebase user confirmed")
+    logger.info("[AUTH] Orphaned Firebase user confirmed (no MongoDB record)")
     return {"cleaned": False, "message": "Account not found in our system. Firebase Admin unavailable for cleanup."}
 
 
@@ -409,7 +409,7 @@ async def refresh_access_token(
         {"$set": {"revoked": True, "revoked_at": now}}
     )
 
-    print(f"[AUTH] Token rotated for user_id={user_id}")
+    logger.info("[AUTH] Refresh token rotated")
     return await _build_auth_response(user_doc, "Token refreshed successfully.", db)
 
 

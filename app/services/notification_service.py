@@ -36,21 +36,21 @@ def init_firebase(cred_path: str):
             cred = credentials.Certificate(json.loads(json_str))
             firebase_admin.initialize_app(cred)
             _initialized = True
-            print("[FCM] ✅ Firebase initialized (env var)")
+            logger.info("[FCM] Firebase initialized (env var)")
             return
         except Exception as e:
-            print(f"[FCM] ❌ init failed: {e}")
+            logger.error(f"[FCM] init failed: {e}")
             return
 
     if cred_path and Path(cred_path).exists():
         try:
             firebase_admin.initialize_app(credentials.Certificate(cred_path))
             _initialized = True
-            print("[FCM] ✅ Firebase initialized (file)")
+            logger.info("[FCM] Firebase initialized (file)")
         except Exception as e:
-            print(f"[FCM] ❌ init failed: {e}")
+            logger.error(f"[FCM] init failed: {e}")
     else:
-        print("[FCM] ⚠️ No credentials — notifications disabled")
+        logger.warning("[FCM] No credentials — notifications disabled")
 
 
 def is_fcm_ready() -> bool:
@@ -389,12 +389,12 @@ async def _dispatch(msg: messaging.Message, label: str):
     for attempt in range(_MAX_RETRIES):
         try:
             response = await asyncio.to_thread(messaging.send, msg)
-            print(f"[FCM] ✅ {label}: {response}")
+            logger.info(f"[FCM] Push sent: {label}")
             return
         except Exception as e:
             last_error = e
             if attempt < _MAX_RETRIES - 1:
                 wait = _RETRY_BACKOFF[attempt]
-                print(f"[FCM] ⚠️ {label} attempt {attempt + 1} failed: {e} — retry in {wait}s")
+                logger.warning(f"[FCM] {label} attempt {attempt + 1} failed, retrying in {wait}s")
                 await asyncio.sleep(wait)
-    print(f"[FCM] ❌ {label} failed after {_MAX_RETRIES} attempts: {last_error}")
+    logger.error(f"[FCM] {label} failed after {_MAX_RETRIES} attempts: {last_error}")

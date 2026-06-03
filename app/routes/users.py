@@ -584,7 +584,9 @@ async def get_user_profile(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{target_id}/follow")
+@limiter.limit("30/minute")
 async def follow_user(
+    request: Request,
     target_id: str,
     current_user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
