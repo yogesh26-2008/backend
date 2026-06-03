@@ -131,6 +131,19 @@ async def _create_indexes():
         except Exception:
             pass
 
+        # ── Post Likes ────────────────────────────────────────────────────────
+        await _db.post_likes.create_index(
+            [("post_id", ASCENDING), ("user_id", ASCENDING)],
+            unique=True,
+            background=True,
+            name="post_likes_post_user",
+        )
+        await _db.post_likes.create_index(
+            [("user_id", ASCENDING), ("post_id", ASCENDING)],
+            background=True,
+            name="post_likes_user_post",
+        )
+
         # ── Follows ───────────────────────────────────────────────────────────
         await _db.follows.create_index(
             [("follower_id", ASCENDING), ("following_id", ASCENDING)],
