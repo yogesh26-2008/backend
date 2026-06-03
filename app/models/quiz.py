@@ -4,7 +4,7 @@ from datetime import datetime
 
 
 class WatchEventRequest(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None   # ignored server-side; authenticated user_id is used
     video_id: str
     watch_percentage: float
     watch_duration_seconds: float

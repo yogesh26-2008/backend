@@ -3,10 +3,11 @@ from typing import List
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 import logging
 
 from app.database import get_db
+from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
 from app.models.quiz import (
     WatchEventRequest, WatchEventResponse,
@@ -27,14 +28,18 @@ def _quiz_doc_to_response(doc: dict) -> dict:
 
 
 @router.post("/video-watch-event", response_model=WatchEventResponse)
+@limiter.limit("60/minute")
 async def video_watch_event(
+    request: Request,
     body: WatchEventRequest,
+    current_user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
+    # body.user_id is intentionally ignored — authenticated user_id is used
     try:
         result = await handle_watch_event(
             db=db,
-            user_id=body.user_id,
+            user_id=current_user_id,
             video_id=body.video_id,
             watch_percentage=body.watch_percentage,
             watch_duration_seconds=body.watch_duration_seconds,
@@ -59,9 +64,17 @@ async def video_watch_event(
 
 
 @router.get("/status/{user_id}", response_model=QuizStatusResponse)
-async def quiz_status(user_id: str, db=Depends(get_db)):
+async def quiz_status(
+    user_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    # Reject requests where path user_id != authenticated user (IDOR prevention)
+    if user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     try:
-        oid = ObjectId(user_id)
+        oid = ObjectId(current_user_id)
     except InvalidId:
         raise HTTPException(status_code=400, detail="Invalid user_id")
 
@@ -81,9 +94,14 @@ async def quiz_status(user_id: str, db=Depends(get_db)):
 
 
 @router.get("/{quiz_id}", response_model=QuizResponse)
-async def get_quiz(quiz_id: str, db=Depends(get_db)):
+async def get_quiz(
+    quiz_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
     quiz = await db.quizzes.find_one({"quiz_id": quiz_id})
-    if not quiz:
+    # Return 404 for missing OR unauthorized — don't reveal existence to non-owner
+    if not quiz or quiz["user_id"] != current_user_id:
         raise HTTPException(status_code=404, detail="Quiz not found")
     if quiz["status"] != "ready":
         raise HTTPException(status_code=202, detail=f"Quiz status: {quiz['status']}")
@@ -102,7 +120,12 @@ async def get_quiz(quiz_id: str, db=Depends(get_db)):
 
 
 @router.post("/{quiz_id}/submit", response_model=SubmitQuizResponse)
-async def submit_quiz(quiz_id: str, body: SubmitQuizRequest, db=Depends(get_db)):
+async def submit_quiz(
+    quiz_id: str,
+    body: SubmitQuizRequest,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
     if len(body.answers) != 5:
         raise HTTPException(status_code=400, detail="answers must have 5 values")
     if len(body.time_per_question) != 5:
@@ -111,7 +134,8 @@ async def submit_quiz(quiz_id: str, body: SubmitQuizRequest, db=Depends(get_db))
         raise HTTPException(status_code=400, detail="Minimum 8 seconds required per question")
 
     quiz = await db.quizzes.find_one({"quiz_id": quiz_id})
-    if not quiz:
+    # Return 404 for missing OR unauthorized — don't reveal existence to non-owner
+    if not quiz or quiz["user_id"] != current_user_id:
         raise HTTPException(status_code=404, detail="Quiz not found")
     if quiz["status"] != "ready":
         raise HTTPException(status_code=400, detail="Quiz not ready")
