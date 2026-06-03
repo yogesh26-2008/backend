@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from app.models.chat import MessageResponse, ConversationResponse
 from app.models.user import UserResponse
-from app.database import get_db
 
 logger = logging.getLogger(__name__)
 

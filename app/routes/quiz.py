@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from typing import List
 
 from bson import ObjectId
 from bson.errors import InvalidId

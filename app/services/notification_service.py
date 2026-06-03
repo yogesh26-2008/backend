@@ -8,12 +8,15 @@ This module only sends FCM pushes.
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
 import firebase_admin
 from firebase_admin import credentials, messaging
+
+logger = logging.getLogger(__name__)
 
 _initialized = False
 
@@ -388,7 +391,7 @@ async def _dispatch(msg: messaging.Message, label: str):
     last_error: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES):
         try:
-            response = await asyncio.to_thread(messaging.send, msg)
+            await asyncio.to_thread(messaging.send, msg)
             logger.info(f"[FCM] Push sent: {label}")
             return
         except Exception as e:

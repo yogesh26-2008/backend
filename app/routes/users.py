@@ -14,7 +14,6 @@ from app.database import get_db
 from app.limiter import limiter
 from app.services.notification_service import send_follow_push, is_fcm_ready
 from app.utils.jwt_handler import get_current_user_id
-from app.task_queue import task_queue
 
 logger = logging.getLogger(__name__)
 

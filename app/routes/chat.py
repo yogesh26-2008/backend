@@ -3,13 +3,12 @@ from typing import List, Optional  # noqa: F401 (Optional used in query params)
 import json
 import logging
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from bson import ObjectId
 from bson.errors import InvalidId
 
 from app.database import get_db
 from app.utils.jwt_handler import get_current_user_id, decode_token
-from app.task_queue import task_queue
 from app.models.chat import ConversationResponse, MessageResponse, ConversationCreate
 from app.services.chat_service import (
     manager,

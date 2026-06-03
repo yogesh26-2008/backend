@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Optional
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -12,7 +12,7 @@ from app.database import get_db
 from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
 from app.services.notification_service import send_like_push, send_comment_push, is_fcm_ready
-from app.cache import get_cache, set_cache, delete_cache, delete_cache_pattern
+from app.cache import get_cache, set_cache, delete_cache_pattern
 from app.utils.cloudinary_transform import optimize_image, optimize_thumbnail, optimize_video
 from app.task_queue import task_queue
 
@@ -107,7 +107,6 @@ async def _send_like_notification(db, post_id: str, liker_id: str):
         logger.info("[LIKE] FCM push queued")
 
     except Exception as e:
-        import traceback
         logger.error(f"[LIKE] notification error: {e}", exc_info=True)
 
 

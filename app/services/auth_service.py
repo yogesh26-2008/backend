@@ -1,8 +1,6 @@
 import asyncio
 import bcrypt as _bcrypt
 import httpx
-import base64
-import json as json_lib
 import logging
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
@@ -66,23 +64,6 @@ async def _build_auth_response(
 def _require_db(db: AsyncIOMotorDatabase):
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available. Please try again.")
-
-
-def _decode_firebase_jwt_payload(token_str: str) -> dict:
-    """
-    Decode Firebase JWT payload WITHOUT signature verification.
-    Used only as a fallback to extract email when Firebase Admin is unavailable.
-    """
-    try:
-        parts = token_str.split(".")
-        if len(parts) != 3:
-            raise ValueError("Invalid JWT format")
-        # Add padding to base64
-        payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
-        payload = json_lib.loads(base64.urlsafe_b64decode(payload_b64))
-        return payload
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token format: {e}")
 
 
 async def _verify_firebase_token(token_str: str) -> dict:
@@ -151,7 +132,7 @@ async def _verify_google_id_token(token_str: str) -> dict | None:
     return None
 
 
-# â"€â"€ Firebase Email Verification Signup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+# --- Firebase Email Verification Signup ------------------------------
 
 async def signup_with_firebase_verified_email(
     data: FirebaseSignupRequest, db: AsyncIOMotorDatabase
@@ -211,7 +192,7 @@ async def signup_with_firebase_verified_email(
     return await _build_auth_response(doc, "Account created successfully. Welcome to Trandia!", db)
 
 
-# â"€â"€ Email/Password Login â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+# --- Email/Password Login ------------------------------
 
 async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthResponse:
     _require_db(db)
@@ -238,7 +219,7 @@ async def login_with_email(data: UserLogin, db: AsyncIOMotorDatabase) -> AuthRes
     return await _build_auth_response(user, "Welcome back to Trandia!", db)
 
 
-# â"€â"€ Google Auth â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+# --- Google Auth ------------------------------
 
 async def auth_with_google_userinfo(
     userinfo: dict, fcm_token: Optional[str], db: AsyncIOMotorDatabase
@@ -328,7 +309,7 @@ async def cleanup_orphaned_firebase_user(
             detail="This email is already registered. Please sign in instead.",
         )
 
-    # Email NOT in MongoDB â†' orphaned Firebase user. Delete it.
+    # Email NOT in MongoDB -> orphaned Firebase user. Delete it.
     # Method 1: Firebase Admin SDK
     if firebase_initialized:
         try:
@@ -338,7 +319,7 @@ async def cleanup_orphaned_firebase_user(
             logger.info("[AUTH] Orphaned Firebase user cleaned up")
             return {"cleaned": True, "message": "Orphaned account cleaned up. Please sign up again."}
         except Exception as e:
-            print(f"[AUTH] âš ï¸ Admin SDK cleanup failed: {type(e).__name__}: {e}")
+            logger.warning(f"[AUTH] Admin SDK cleanup failed: {type(e).__name__}: {e}")
             # Fall through to REST API
 
     # Method 2: Firebase REST API -- can't delete users, but we can confirm the orphan

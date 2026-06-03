@@ -12,7 +12,6 @@ Swap Cloudinary for another CDN: only media_service.py needs to change.
 
 import uuid
 import logging
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel

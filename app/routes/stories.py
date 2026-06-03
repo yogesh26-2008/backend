@@ -1,6 +1,5 @@
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 import asyncio
 import logging
 

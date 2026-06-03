@@ -14,7 +14,6 @@ from app.database import get_db
 from app.utils.jwt_handler import get_current_user_id
 from bson import ObjectId
 from bson.errors import InvalidId
-from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
