@@ -14,6 +14,7 @@ from app.database import get_db
 from app.limiter import limiter
 from app.services.notification_service import send_follow_push, is_fcm_ready
 from app.utils.jwt_handler import get_current_user_id
+from app.utils.background import fire_and_forget
 
 logger = logging.getLogger(__name__)
 
@@ -629,8 +630,8 @@ async def follow_user(
     target_notif_follows = _tns.get("follows", True)
 
     logger.info(
-        f"[FOLLOW] {current_user_id}({follower_username}) → {target_id} | "
-        f"fcm={'✓' if fcm_token else '✗ MISSING — user must open app'}"
+        f"[FOLLOW] {current_user_id} -> {target_id} "
+        f"(fcm={'present' if fcm_token else 'missing'})"
     )
 
     notif_id = str(ObjectId())
@@ -647,9 +648,9 @@ async def follow_user(
             "read":          False,
             "created_at":    now,
         })
-        logger.info(f"[FOLLOW] ✅ notification saved id={notif_id}")
+        logger.info(f"[FOLLOW] notification saved id={notif_id}")
     except Exception as e:
-        logger.error(f"[FOLLOW] ❌ notification insert failed: {e}")
+        logger.error(f"[FOLLOW] notification insert failed: {e}")
 
     try:
         from app.services.chat_service import manager
@@ -669,13 +670,13 @@ async def follow_user(
                 },
             })
             await manager.send_personal_message(ws_payload, target_id)
-            logger.info(f"[FOLLOW] ✅ WS notification delivered to {target_id}")
+            logger.info(f"[FOLLOW] WS notification delivered to {target_id}")
     except Exception as ws_err:
         logger.warning(f"[FOLLOW] WS error: {ws_err}")
 
     if fcm_token and is_fcm_ready() and target_notif_master and target_notif_follows:
         # FCM push: fire-and-forget, NO retry — duplicate notifications unacceptable
-        asyncio.create_task(
+        fire_and_forget(
             send_follow_push(
                 fcm_token=fcm_token,
                 follower_username=follower_username,
@@ -685,12 +686,7 @@ async def follow_user(
         )
         logger.info(f"[FOLLOW] FCM push scheduled for {target_id}")
     else:
-        if not target_notif_master or not target_notif_follows:
-            logger.info(f"[FOLLOW] 🔕 FCM skipped — {target_id} has follow notifications disabled")
-        elif not fcm_token:
-            logger.warning(f"[FOLLOW] ⚠️ No FCM token for {target_id} — push skipped")
-        elif not is_fcm_ready():
-            logger.warning("[FOLLOW] ⚠️ Firebase not initialized — push skipped")
+        logger.info(f"[FOLLOW] push skipped for {target_id} (no token / disabled / FCM not ready)")
 
     return {"detail": "followed", "following": True}
 
@@ -773,7 +769,10 @@ async def get_followers(
         except Exception:
             continue
 
-    users = await db.users.find({"_id": {"$in": follower_oids}}).to_list(length=limit)
+    users = await db.users.find(
+        {"_id": {"$in": follower_oids}},
+        {"name": 1, "username": 1, "picture": 1, "public_key": 1},
+    ).to_list(length=limit)
 
     # Check which of these followers the current user is following
     target_ids = [str(u["_id"]) for u in users]
@@ -830,7 +829,10 @@ async def get_following(
         except Exception:
             continue
 
-    users = await db.users.find({"_id": {"$in": following_oids}}).to_list(length=limit)
+    users = await db.users.find(
+        {"_id": {"$in": following_oids}},
+        {"name": 1, "username": 1, "picture": 1, "public_key": 1},
+    ).to_list(length=limit)
 
     # Check which of these users the current user is following
     target_ids = [str(u["_id"]) for u in users]

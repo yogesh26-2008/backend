@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from app.models.chat import MessageResponse, ConversationResponse
 from app.models.user import UserResponse
+from app.utils.background import fire_and_forget
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class ConnectionManager:
                 del self.active_connections[user_id]
                 # Unsubscribe from Redis channel when last socket for this user closes
                 if self._pubsub is not None:
-                    asyncio.create_task(
+                    fire_and_forget(
                         self._unsubscribe(f"{_WS_CHANNEL_PREFIX}{user_id}")
                     )
 

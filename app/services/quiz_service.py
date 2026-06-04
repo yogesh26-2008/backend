@@ -12,6 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.config import settings
 from app.services.notification_service import send_quiz_ready_push, is_fcm_ready
+from app.utils.background import fire_and_forget
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +307,7 @@ async def _run_generation(db: AsyncIOMotorDatabase, quiz_id: str, user_id: str, 
                 fcm_token = user_doc.get("fcm_token") if user_doc else None
                 if fcm_token:
                     # FCM push: fire-and-forget, NO retry — duplicates unacceptable
-                    asyncio.create_task(
+                    fire_and_forget(
                         send_quiz_ready_push(
                             fcm_token=fcm_token,
                             quiz_id=quiz_id,

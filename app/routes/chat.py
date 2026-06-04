@@ -21,6 +21,7 @@ from app.services.chat_service import (
     toggle_reaction,
 )
 from app.services.notification_service import schedule_message_notification
+from app.utils.background import fire_and_forget
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -69,7 +70,7 @@ async def get_messages(
     if not conv:
         raise HTTPException(status_code=403, detail="Not a participant in this conversation")
 
-    asyncio.create_task(mark_messages_read(conversation_id, user_id, db))
+    fire_and_forget(mark_messages_read(conversation_id, user_id, db))
     return await get_conversation_messages(conversation_id, db, skip, limit, before_id=before_id)
 
 
@@ -256,7 +257,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     sender_username: str = (sender_doc or {}).get("username", "Someone")
 
     # Broadcast online presence to conversation partners
-    asyncio.create_task(broadcast_presence(user_id, True, db))
+    fire_and_forget(broadcast_presence(user_id, True, db))
 
     try:
         while True:
@@ -299,7 +300,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         await manager.send_personal_message(broadcast, pid)
 
                     # FCM push: fire-and-forget, NO retry — duplicates unacceptable
-                    asyncio.create_task(
+                    fire_and_forget(
                         _push_to_eligible_recipients(
                             sender_id=user_id,
                             sender_username=sender_username,
@@ -425,4 +426,4 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     finally:
         manager.disconnect(websocket, user_id)
         # Broadcast offline presence to conversation partners
-        asyncio.create_task(broadcast_presence(user_id, False, db))
+        fire_and_forget(broadcast_presence(user_id, False, db))

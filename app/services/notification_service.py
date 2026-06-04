@@ -16,6 +16,8 @@ from typing import Optional
 import firebase_admin
 from firebase_admin import credentials, messaging
 
+from app.utils.background import fire_and_forget
+
 logger = logging.getLogger(__name__)
 
 _initialized = False
@@ -61,7 +63,7 @@ def is_fcm_ready() -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Async send functions — call these directly with asyncio.create_task()
+# Async send functions — schedule these via fire_and_forget() (app.utils.background)
 # from within async route handlers. Never wrap in sync functions.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -73,7 +75,7 @@ async def send_follow_push(
 ):
     """
     Send FCM push for a new follower.
-    Call as: asyncio.create_task(send_follow_push(...))
+    Call as: fire_and_forget(send_follow_push(...))
     from within an async route handler.
     """
     title = follower_name or follower_username
@@ -355,7 +357,7 @@ def schedule_welcome_notification(
 ):
     if not _initialized or not fcm_token or not master_enabled:
         return
-    asyncio.create_task(send_welcome_push(fcm_token, name, is_signup))
+    fire_and_forget(send_welcome_push(fcm_token, name, is_signup))
 
 
 def schedule_message_notification(
@@ -365,7 +367,7 @@ def schedule_message_notification(
 ):
     if not _initialized or not fcm_token:
         return
-    asyncio.create_task(send_message_push(fcm_token, sender_username, conversation_id))
+    fire_and_forget(send_message_push(fcm_token, sender_username, conversation_id))
 
 
 # Backward-compat stub (DB insert removed — handled in users.py)
@@ -378,7 +380,7 @@ def schedule_follow_notification(
     db=None,
 ):
     if _initialized and fcm_token:
-        asyncio.create_task(
+        fire_and_forget(
             send_follow_push(fcm_token, follower_username, follower_name)
         )
 
