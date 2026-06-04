@@ -10,8 +10,10 @@ REST endpoints for the in-app notification feed.
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
+from datetime import datetime
 from app.database import get_db
 from app.utils.jwt_handler import get_current_user_id
+from app.cache import get_cache, set_cache, delete_cache
 from bson import ObjectId
 from bson.errors import InvalidId
 import logging
@@ -30,6 +32,13 @@ async def get_notifications(
     db=Depends(get_db),
 ):
     """Return notifications for the current user, newest first (cursor-paginated)."""
+    # Cache the default first page only (no cursor, no skip, default limit).
+    cache_key = f"notifs:u:{user_id}" if (not cursor and skip == 0 and limit == 40) else None
+    if cache_key:
+        cached = await get_cache(cache_key)
+        if cached is not None:
+            return cached
+
     query: dict = {"recipient_id": user_id}
     if cursor:
         try:
@@ -74,9 +83,15 @@ async def get_notifications(
             "from_picture": picture_map.get(fuid),
             "text": d.get("text", ""),
             "read": d.get("read", False),
-            "created_at": d.get("created_at", ""),
+            "created_at": (
+                d["created_at"].isoformat()
+                if isinstance(d.get("created_at"), datetime)
+                else (d.get("created_at") or "")
+            ),
         })
 
+    if cache_key:
+        await set_cache(cache_key, result, expire_seconds=15)
     return result
 
 
@@ -90,6 +105,7 @@ async def mark_all_read(
         {"recipient_id": user_id, "read": False},
         {"$set": {"read": True}},
     )
+    await delete_cache(f"notifs:u:{user_id}")
     return {"detail": "ok", "modified": result.modified_count}
 
 
@@ -111,6 +127,7 @@ async def mark_one_read(
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Notification not found")
+    await delete_cache(f"notifs:u:{user_id}")
     return {"detail": "ok"}
 
 
@@ -131,4 +148,5 @@ async def delete_notification(
     )
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Notification not found")
+    await delete_cache(f"notifs:u:{user_id}")
     return {"detail": "ok"}

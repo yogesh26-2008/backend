@@ -396,6 +396,12 @@ async def _dispatch(msg: messaging.Message, label: str):
             await asyncio.to_thread(messaging.send, msg)
             logger.info(f"[FCM] Push sent: {label}")
             return
+        except messaging.UnregisteredError:
+            # Token is dead (app uninstalled / token rotated). Stop retrying and
+            # purge it so future sends never waste attempts on it again.
+            await _purge_dead_token(getattr(msg, "token", None))
+            logger.info(f"[FCM] {label} skipped — dead token purged")
+            return
         except Exception as e:
             last_error = e
             if attempt < _MAX_RETRIES - 1:
@@ -403,3 +409,16 @@ async def _dispatch(msg: messaging.Message, label: str):
                 logger.warning(f"[FCM] {label} attempt {attempt + 1} failed, retrying in {wait}s")
                 await asyncio.sleep(wait)
     logger.error(f"[FCM] {label} failed after {_MAX_RETRIES} attempts: {last_error}")
+
+
+async def _purge_dead_token(token: Optional[str]) -> None:
+    """Remove a dead FCM token from every user that still has it stored."""
+    if not token:
+        return
+    try:
+        from app.database import get_db
+        db = get_db()
+        if db is not None:
+            await db.users.update_many({"fcm_token": token}, {"$unset": {"fcm_token": ""}})
+    except Exception as e:
+        logger.warning(f"[FCM] dead-token purge failed: {e}")

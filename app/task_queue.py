@@ -19,6 +19,8 @@ import asyncio
 import logging
 from typing import Any, Callable, Coroutine, Optional, Tuple
 
+from app.utils.background import fire_and_forget
+
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES  = 3
@@ -107,16 +109,11 @@ class TaskQueue:
                         f"(attempt {attempt + 1}/{_MAX_RETRIES + 1}), "
                         f"retrying in {delay:.0f}s — {type(exc).__name__}: {exc}"
                     )
-                    await asyncio.sleep(delay)
-                    # Re-enqueue with incremented attempt counter
-                    retry_item = (fn, args, kwargs, attempt + 1)
-                    try:
-                        self._queue.put_nowait(retry_item)
-                    except asyncio.QueueFull:
-                        logger.error(
-                            f"[TaskQueue] Queue full during retry — "
-                            f"permanently dropping: {task_name}"
-                        )
+                    # Re-enqueue AFTER the backoff WITHOUT blocking the worker, so
+                    # other queued tasks keep flowing during the wait.
+                    fire_and_forget(
+                        self._requeue_after(delay, (fn, args, kwargs, attempt + 1), task_name)
+                    )
                 else:
                     logger.error(
                         f"[TaskQueue] DEAD LETTER: {task_name} failed after "
@@ -124,6 +121,18 @@ class TaskQueue:
                     )
             finally:
                 self._queue.task_done()
+
+    async def _requeue_after(self, delay: float, item: Tuple, task_name: str) -> None:
+        """Wait out the backoff, then re-enqueue the retry item — without
+        blocking the worker loop so other queued tasks keep flowing."""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            logger.error(f"[TaskQueue] Queue full during retry — dropping: {task_name}")
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

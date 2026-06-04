@@ -12,6 +12,8 @@ from app.database import get_db
 from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
 from app.utils.cloudinary_transform import optimize_image
+from app.task_queue import task_queue
+from app.cache import get_cache, set_cache, delete_cache
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -152,6 +154,7 @@ async def hide_all_stories_from(
         {"user_id": user_id},
         {"$addToSet": {"hidden_from": target_id}},
     )
+    await delete_cache(f"stories:u:{user_id}")
     return {"ok": True, "hidden_from_user": body.target_username}
 
 
@@ -210,6 +213,7 @@ async def create_story(
 
     result    = await db.stories.insert_one(doc)
     doc["_id"] = result.inserted_id
+    await delete_cache(f"stories:u:{user_id}")
     return _serialize_story(doc, user_id)
 
 
@@ -222,6 +226,12 @@ async def get_stories(
     user_id: str = Depends(get_current_user_id),
     db       = Depends(get_db),
 ):
+    # Per-user cache (short TTL) — includes this viewer's seen/viewed state.
+    cache_key = f"stories:u:{user_id}"
+    cached = await get_cache(cache_key)
+    if cached is not None:
+        return cached
+
     now = datetime.now(timezone.utc)
 
     # ── Step 1: followees list (only IDs needed) ──────────────────────────────
@@ -250,7 +260,9 @@ async def get_stories(
     ).sort("created_at", -1).to_list(length=500)
 
     if not all_stories:
-        return {"users": []}
+        empty = {"users": []}
+        await set_cache(cache_key, empty, expire_seconds=15)
+        return empty
 
     # ── Step 3: privacy filter (private accounts not in followees) ───────────
     # Only check privacy for non-self stories
@@ -315,7 +327,9 @@ async def get_stories(
             "stories":       [_serialize_story(s, user_id) for s in ss],
         })
 
-    return {"users": result}
+    out = {"users": result}
+    await set_cache(cache_key, out, expire_seconds=30)
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +358,7 @@ async def view_story(
             {"_id": oid},
             {"$addToSet": {"viewers": user_id}, "$inc": {"view_count": 1}},
         )
+        await delete_cache(f"stories:u:{user_id}")
     return {"ok": True}
 
 
@@ -378,6 +393,7 @@ async def hide_story_from(
         {"_id": oid},
         {"$addToSet": {"hidden_from": str(target["_id"])}},
     )
+    await delete_cache(f"stories:u:{user_id}")
     return {"ok": True, "hidden_from_user": body.target_username}
 
 
@@ -396,11 +412,19 @@ async def delete_story(
     except (InvalidId, Exception):
         raise HTTPException(status_code=400, detail="Invalid story ID")
 
-    story = await db.stories.find_one({"_id": oid}, {"user_id": 1})
+    story = await db.stories.find_one({"_id": oid}, {"user_id": 1, "public_id": 1})
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
     if story["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not your story")
 
     await db.stories.delete_one({"_id": oid})
+
+    # Also remove the Cloudinary asset (retry-safe) so manual deletes don't leave
+    # orphaned media — the same cleanup the expiry job does for expired stories.
+    public_id = story.get("public_id", "")
+    if public_id:
+        await task_queue.enqueue(_delete_from_cloudinary, public_id)
+
+    await delete_cache(f"stories:u:{user_id}")
     return {"ok": True}

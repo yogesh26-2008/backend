@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,22 @@ from app.task_queue import task_queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── Error monitoring (optional) ──────────────────────────────────────────────
+# Activates only when SENTRY_DSN is set. Guarded so a missing package or a bad
+# DSN can never stop the app from booting.
+_sentry_dsn = os.environ.get("SENTRY_DSN", "").strip()
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            traces_sample_rate=0.1,
+            environment=os.environ.get("RAILWAY_ENVIRONMENT", "production"),
+        )
+        logger.info("[Sentry] Error monitoring initialized")
+    except Exception as e:
+        logger.warning(f"[Sentry] init skipped: {e}")
 
 class LimitUploadSize(BaseHTTPMiddleware):
     def __init__(self, app, max_upload_size: int):
@@ -382,14 +399,26 @@ async def health():
 
 @app.get("/health/ready", tags=["Health"])
 async def health_ready():
-    """Readiness check - includes dependencies."""
+    """Readiness check — verifies the hard dependency (DB) and reports Redis."""
     from app.database import get_db
     try:
         db = get_db()
-        if db is not None:
-            await db.command("ping")
-            return {"status": "ready", "database": "connected"}
-        else:
-            return JSONResponse(status_code=503, content={"status": "not_ready"})
+        if db is None:
+            return JSONResponse(status_code=503, content={"status": "not_ready", "database": "disconnected"})
+        await db.command("ping")
     except Exception as e:
-        return JSONResponse(status_code=503, content={"status": "error", "error": str(e)})
+        return JSONResponse(status_code=503, content={"status": "error", "database": str(e)})
+
+    result = {"status": "ready", "database": "connected"}
+    # Redis is optional (the app degrades gracefully without it), so report its
+    # state but don't fail readiness on it.
+    try:
+        from app.cache import _redis_client
+        if _redis_client is not None:
+            await _redis_client.ping()
+            result["redis"] = "connected"
+        else:
+            result["redis"] = "disabled"
+    except Exception:
+        result["redis"] = "error"
+    return result

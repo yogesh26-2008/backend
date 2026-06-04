@@ -130,11 +130,20 @@ async def _create_indexes():
             background=True,
             name="notifications_recipient",
         )
+        # Drop any old short (30-day) TTL, then add a generous 365-day TTL so the
+        # collection can't grow unbounded — while keeping a full year of history
+        # (no real user reads notifications older than that). Adjust or drop this
+        # index if you want a different retention.
         try:
             await _db.notifications.drop_index("notifications_ttl_30d")
-            logger.info("[DB] Removed notifications TTL index.")
         except Exception:
             pass
+        await _db.notifications.create_index(
+            [("created_at", ASCENDING)],
+            expireAfterSeconds=365 * 24 * 3600,
+            background=True,
+            name="notifications_ttl_365d",
+        )
 
         # ── Comments ──────────────────────────────────────────────────────────
         # Primary: fetch top-level comments for a post (post_id + parent_id=null + _id sort)

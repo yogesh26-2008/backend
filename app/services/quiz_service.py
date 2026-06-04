@@ -380,7 +380,10 @@ async def handle_watch_event(
 
     if watch_percentage >= COUNT_THRESHOLD_PCT and video_id not in viewed_ids:
         updates["$inc"] = {"learn_view_count": 1}
-        updates["$push"] = {"viewed_video_ids": video_id}
+        # Cap the array at the most recent 500 ids so the user doc can't grow
+        # unbounded (which would slow every user lookup). Recent-view dedup,
+        # which is all this list is used for, is unaffected.
+        updates["$push"] = {"viewed_video_ids": {"$each": [video_id], "$slice": -500}}
         learn_count += 1
 
     if watch_percentage >= POOL_THRESHOLD_PCT:

@@ -1,0 +1,13 @@
+# Railway deploy config — resilience settings for scale.
+# NOTE: startCommand is intentionally omitted so the Procfile keeps driving the
+# start (uvicorn + workers + ws keepalive). This file only adds healthcheck-gated
+# deploys and automatic restarts on failure.
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5

@@ -12,7 +12,7 @@ from app.database import get_db
 from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
 from app.services.notification_service import send_like_push, send_comment_push, is_fcm_ready
-from app.cache import get_cache, set_cache, delete_cache_pattern
+from app.cache import get_cache, set_cache, delete_cache, delete_cache_pattern
 from app.utils.cloudinary_transform import optimize_image, optimize_thumbnail, optimize_video
 from app.task_queue import task_queue
 from app.utils.background import fire_and_forget
@@ -752,6 +752,7 @@ async def create_comment(
                     )
                 )
 
+    await delete_cache(f"comments:{post_id}:u:{user_id}")
     return {
         "comment": _fmt_comment(comment_doc, user_id, set()),
         "new_count": None,  # not fetched here — caller already updates optimistically
@@ -777,6 +778,13 @@ async def get_comments(
     except (InvalidId, Exception):
         raise HTTPException(status_code=400, detail="Invalid post ID.")
 
+    # Per-(user, post) cache for the default first page only (no cursor).
+    cache_key = f"comments:{post_id}:u:{user_id}" if (not cursor and limit == 20) else None
+    if cache_key:
+        cached = await get_cache(cache_key)
+        if cached is not None:
+            return cached
+
     # Cursor-based pagination — fetch comments AFTER the given cursor id
     query: dict = {"post_id": post_id, "parent_id": None}
     if cursor:
@@ -788,7 +796,10 @@ async def get_comments(
     top_docs = await db.comments.find(query).sort("_id", 1).limit(limit).to_list(limit)
 
     if not top_docs:
-        return {"comments": [], "next_cursor": None}
+        empty = {"comments": [], "next_cursor": None}
+        if cache_key:
+            await set_cache(cache_key, empty, expire_seconds=20)
+        return empty
 
     top_ids = [str(d["_id"]) for d in top_docs]
 
@@ -821,7 +832,10 @@ async def get_comments(
 
     next_cursor = top_ids[-1] if len(top_docs) == limit else None
 
-    return {"comments": comments_out, "next_cursor": next_cursor}
+    result = {"comments": comments_out, "next_cursor": next_cursor}
+    if cache_key:
+        await set_cache(cache_key, result, expire_seconds=20)
+    return result
 
 
 @router.delete("/comments/{comment_id}")
@@ -865,6 +879,7 @@ async def delete_comment(
             {"_id": ObjectId(post_id)},
             {"$inc": {"comments_count": -total_decrement}},
         )
+        await delete_cache(f"comments:{post_id}:u:{user_id}")
 
     return {"deleted": True}
 
