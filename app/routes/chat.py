@@ -54,8 +54,8 @@ async def start_conversation(
 @router.get("/{conversation_id}/messages", response_model=List[MessageResponse])
 async def get_messages(
     conversation_id: str,
-    skip: int = 0,
-    limit: int = 50,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
     before_id: Optional[str] = None,
     user_id: str = Depends(get_current_user_id),
     db=Depends(get_db),

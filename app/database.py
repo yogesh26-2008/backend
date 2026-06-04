@@ -18,7 +18,7 @@ async def connect_db():
         connectTimeoutMS=30000,
         socketTimeoutMS=30000,
         minPoolSize=10,
-        maxPoolSize=300,
+        maxPoolSize=100,   # 100 × 4 uvicorn workers = 400 conns — safe under Atlas shared-tier 500 cap
         maxIdleTimeMS=45000,
         tlsCAFile=certifi.where(),
     )

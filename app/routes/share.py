@@ -217,13 +217,21 @@ async def video_preview(token: str, db=Depends(get_db)):
         f'<p class="caption">{html_lib.escape(caption)}</p>' if caption else ""
     )
 
+    # URL values flow into HTML attributes too. media_url is validated at
+    # post-creation, but thumbnail_url is client-supplied — an un-escaped value
+    # could break out of the attribute (stored XSS). Valid Cloudinary URLs are
+    # unaffected by escaping (& becomes &amp;, which browsers decode back).
+    safe_media_url = html_lib.escape(media_url, quote=True)
+    safe_thumbnail_url = html_lib.escape(thumbnail_url, quote=True)
+    safe_og_url = html_lib.escape(f"{_BASE_URL}/v/{token}", quote=True)
+
     return HTMLResponse(content=_render_html(
         og_title=og_title,
         og_description=og_description,
-        og_image=thumbnail_url,
-        og_url=f"{_BASE_URL}/v/{token}",
-        video_url=media_url,
-        thumbnail_url=thumbnail_url,
+        og_image=safe_thumbnail_url,
+        og_url=safe_og_url,
+        video_url=safe_media_url,
+        thumbnail_url=safe_thumbnail_url,
         creator_name=html_lib.escape(creator_name),
         creator_username=html_lib.escape(creator_username),
         avatar_letter=html_lib.escape(creator_name[0].upper()),
