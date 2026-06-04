@@ -3,6 +3,7 @@ from typing import List, Optional  # noqa: F401 (Optional used in query params)
 import json
 import logging
 import asyncio
+import time
 from datetime import datetime
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -259,6 +260,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     # Broadcast online presence to conversation partners
     fire_and_forget(broadcast_presence(user_id, True, db))
 
+    # Per-connection sliding window of recent message-event timestamps (anti-flood).
+    _msg_times: list[float] = []
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -278,6 +282,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     if not conv_id or not text:
                         continue
                     if len(text) > 10000:
+                        continue
+
+                    # Per-connection flood guard — cap message writes to 40 per 10s.
+                    # Humans never hit this; spam scripts do.
+                    _now = time.time()
+                    _msg_times.append(_now)
+                    _msg_times[:] = [t for t in _msg_times if _now - t < 10.0]
+                    if len(_msg_times) > 40:
                         continue
 
                     try:

@@ -12,6 +12,7 @@ from app.models.quiz import (
     WatchEventRequest, WatchEventResponse,
     QuizStatusResponse, QuizResponse,
     SubmitQuizRequest, SubmitQuizResponse,
+    AnswerRevealRequest, AnswerRevealResponse,
 )
 from app.services.quiz_service import handle_watch_event
 
@@ -105,16 +106,77 @@ async def get_quiz(
     if quiz["status"] != "ready":
         raise HTTPException(status_code=202, detail=f"Quiz status: {quiz['status']}")
 
+    # Anti-cheat: never send correct answers / explanations up-front. They are
+    # revealed one question at a time via POST /quiz/{id}/answer, only after the
+    # user commits an answer.
+    safe_questions = [
+        {
+            "question_text": q.get("question_text", ""),
+            "options": q.get("options", []),
+            "difficulty": q.get("difficulty", "saral"),
+            "correct_answer_index": None,
+            "explanation": None,
+        }
+        for q in quiz["questions"]
+    ]
+
     return QuizResponse(
         quiz_id=quiz["quiz_id"],
         user_id=quiz["user_id"],
         source_video_ids=quiz["source_video_ids"],
-        questions=quiz["questions"],
+        questions=safe_questions,
         status=quiz["status"],
         pattern=quiz["pattern"],
         ai_provider_used=quiz.get("ai_provider_used"),
         created_at=quiz["created_at"],
         attempted=quiz.get("attempted", False),
+    )
+
+
+@router.post("/{quiz_id}/answer", response_model=AnswerRevealResponse)
+@limiter.limit("60/minute")
+async def reveal_answer(
+    request: Request,
+    quiz_id: str,
+    body: AnswerRevealRequest,
+    current_user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """
+    Reveal the correct answer for ONE question — only after the user commits.
+    Records the user's answer first-write-wins so the reveal can't be used to
+    brute-force the quiz; submit scores from these recorded answers.
+    """
+    if not (0 <= body.question_index <= 4):
+        raise HTTPException(status_code=400, detail="Invalid question_index")
+
+    quiz = await db.quizzes.find_one({"quiz_id": quiz_id})
+    if not quiz or quiz["user_id"] != current_user_id:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    if quiz.get("status") != "ready":
+        raise HTTPException(status_code=400, detail="Quiz not ready")
+    if quiz.get("attempted"):
+        raise HTTPException(status_code=400, detail="Quiz already submitted")
+
+    questions = quiz.get("questions", [])
+    if body.question_index >= len(questions):
+        raise HTTPException(status_code=400, detail="Invalid question_index")
+
+    q = questions[body.question_index]
+    correct_index = q.get("correct_answer_index", 0)
+    explanation = q.get("explanation", "")
+
+    # Record the answer first-write-wins (only sets it if not already recorded).
+    field = f"recorded_answers.{body.question_index}"
+    await db.quizzes.update_one(
+        {"quiz_id": quiz_id, field: {"$exists": False}},
+        {"$set": {field: body.selected}},
+    )
+
+    return AnswerRevealResponse(
+        correct_index=correct_index,
+        explanation=explanation,
+        is_correct=(body.selected == correct_index),
     )
 
 
@@ -132,14 +194,30 @@ async def submit_quiz(
     if any(t < 8 for t in body.time_per_question):
         raise HTTPException(status_code=400, detail="Minimum 8 seconds required per question")
 
-    quiz = await db.quizzes.find_one({"quiz_id": quiz_id})
-    # Return 404 for missing OR unauthorized — don't reveal existence to non-owner
-    if not quiz or quiz["user_id"] != current_user_id:
-        raise HTTPException(status_code=404, detail="Quiz not found")
-    if quiz["status"] != "ready":
-        raise HTTPException(status_code=400, detail="Quiz not ready")
-    if quiz.get("attempted"):
+    # Atomically claim the attempt — prevents a double-submit race from scoring
+    # twice. find_one_and_update returns the PRE-update doc (or None if no match).
+    quiz = await db.quizzes.find_one_and_update(
+        {"quiz_id": quiz_id, "user_id": current_user_id,
+         "status": "ready", "attempted": {"$ne": True}},
+        {"$set": {"attempted": True}},
+    )
+    if quiz is None:
+        # No atomic match — determine why, preserving the original error codes.
+        existing = await db.quizzes.find_one(
+            {"quiz_id": quiz_id}, {"user_id": 1, "status": 1, "attempted": 1}
+        )
+        if not existing or existing.get("user_id") != current_user_id:
+            raise HTTPException(status_code=404, detail="Quiz not found")
+        if existing.get("status") != "ready":
+            raise HTTPException(status_code=400, detail="Quiz not ready")
         raise HTTPException(status_code=400, detail="Quiz already attempted")
+
+    # Score from server-recorded answers (set via /answer) so a client that saw
+    # the reveal cannot change its committed answer. For any question that was
+    # not recorded (network hiccup, or an older app version), fall back to the
+    # submitted answer — safe, because a missing record means the client never
+    # saw that answer either.
+    recorded = quiz.get("recorded_answers") or {}
 
     score = 0
     skill_delta = 0
@@ -147,9 +225,16 @@ async def submit_quiz(
     explanations = []
 
     for i, q in enumerate(quiz["questions"]):
-        correct_answers.append(q["correct_answer_index"])
+        ci = q["correct_answer_index"]
+        correct_answers.append(ci)
         explanations.append(q.get("explanation", ""))
-        if body.answers[i] == q["correct_answer_index"]:
+        if str(i) in recorded:
+            user_ans = recorded[str(i)]
+        elif i < len(body.answers):
+            user_ans = body.answers[i]
+        else:
+            user_ans = None
+        if user_ans == ci:
             score += 1
             skill_delta += DIFFICULTY_POINTS.get(q.get("difficulty", "saral"), 1)
 

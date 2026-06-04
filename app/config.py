@@ -67,5 +67,17 @@ class Settings(BaseSettings):
             raise ValueError("APP_SECRET_KEY must be at least 16 characters.")
         return v
 
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def jwt_secret_must_be_strong(cls, v: str) -> str:
+        if v in ("your-256-bit-secret-key-here", "change-me", "secret", "trandia-secret-key", ""):
+            raise ValueError(
+                "JWT_SECRET_KEY is using an insecure default. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        if len(v) < 32:
+            raise ValueError("JWT_SECRET_KEY must be at least 32 characters.")
+        return v
+
 
 settings = Settings()

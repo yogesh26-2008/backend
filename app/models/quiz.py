@@ -23,8 +23,9 @@ class WatchEventResponse(BaseModel):
 class QuizQuestion(BaseModel):
     question_text: str
     options: List[str]
-    correct_answer_index: int
-    explanation: str
+    # Omitted in GET /quiz/{id} (anti-cheat) — revealed per-question via /answer.
+    correct_answer_index: Optional[int] = None
+    explanation: Optional[str] = None
     difficulty: str  # saral / samanya / kathin
 
 
@@ -57,3 +58,14 @@ class SubmitQuizResponse(BaseModel):
     correct_answers: List[int]
     explanations: List[str]
     skill_score_delta: int
+
+
+class AnswerRevealRequest(BaseModel):
+    question_index: int
+    selected: Optional[int] = None   # null = timed out / skipped
+
+
+class AnswerRevealResponse(BaseModel):
+    correct_index: int
+    explanation: str
+    is_correct: bool

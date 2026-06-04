@@ -3,12 +3,13 @@
 # GET /agora/token?channel=xxx&uid=0  → { "token": "...", "app_id": "..." }
 
 import time
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from agora_token_builder import RtcTokenBuilder
 from agora_token_builder.RtcTokenBuilder import Role_Publisher
 
 from app.config import settings
+from app.limiter import limiter
 from app.utils.jwt_handler import get_current_user_id
 
 router = APIRouter()
@@ -59,7 +60,9 @@ def _build_token(channel_name: str, uid: int) -> str:
 
 
 @router.get("/token")
+@limiter.limit("30/minute")
 async def get_agora_token(
+    request: Request,
     channel: str = Query(..., description="Agora channel name"),
     uid: int = Query(default=0, description="Agora user UID (0 = auto-assign)"),
     current_user_id: str = Depends(get_current_user_id),
@@ -82,8 +85,8 @@ async def get_agora_token(
 
     try:
         token = _build_token(channel, uid)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Token generation failed")
 
     return {
         "token": token,

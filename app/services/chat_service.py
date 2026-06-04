@@ -303,7 +303,7 @@ async def get_user_conversations(user_id: str, db) -> List[ConversationResponse]
                         id=str(user_doc["_id"]),
                         name=user_doc.get("name", ""),
                         username=user_doc.get("username", ""),
-                        email=user_doc.get("email", ""),
+                        email="",  # privacy: never expose a chat partner's email to other users
                         picture=user_doc.get("picture"),
                         is_google_user=user_doc.get("is_google_user", False),
                         created_at=user_doc["created_at"],

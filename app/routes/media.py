@@ -16,7 +16,10 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 
+from bson import ObjectId
+
 from app.limiter import limiter
+from app.database import get_db
 from app.utils.jwt_handler import get_current_user_id
 from app.services.media_service import get_media_provider
 
@@ -151,6 +154,7 @@ async def delete_media(
     request: Request,
     body: DeleteRequest,
     user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
 ):
     if body.resource_type not in ALLOWED_RESOURCE_TYPES:
         raise HTTPException(status_code=400, detail="resource_type must be 'image' or 'video'")
@@ -159,11 +163,30 @@ async def delete_media(
     if not body.public_id.startswith("trandia/"):
         raise HTTPException(status_code=403, detail="Cannot delete media outside trandia/ folder")
 
+    # IDOR guard: public_id is exposed in feed responses, so a prefix check alone
+    # would let anyone delete anyone's media. Only allow deletion of media the
+    # caller actually owns — attached to their own post/story, or their profile pic.
+    if not await _user_owns_media(db, user_id, body.public_id):
+        raise HTTPException(status_code=403, detail="You can only delete your own media")
+
     provider = get_media_provider()
     deleted = await provider.delete(body.public_id, body.resource_type)
     if not deleted:
         raise HTTPException(status_code=404, detail="Media not found or already deleted")
     return {"detail": "deleted"}
+
+
+async def _user_owns_media(db, user_id: str, public_id: str) -> bool:
+    """True if public_id is on a post/story owned by user, or is their profile picture."""
+    if await db.posts.find_one({"public_id": public_id, "user_id": user_id}, {"_id": 1}):
+        return True
+    if await db.stories.find_one({"public_id": public_id, "user_id": user_id}, {"_id": 1}):
+        return True
+    try:
+        me = await db.users.find_one({"_id": ObjectId(user_id)}, {"picture": 1})
+    except Exception:
+        me = None
+    return bool(me and me.get("picture") and public_id in me["picture"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
