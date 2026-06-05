@@ -44,6 +44,15 @@ async def _create_indexes():
         await _db.users.create_index(
             [("google_id", ASCENDING)], sparse=True, background=True
         )
+        # Collaborator discovery — filter by account_type (creator/business/
+        # professional). Sparse: only docs that have set an account_type are
+        # indexed, keeping it small for the personal-account majority.
+        await _db.users.create_index(
+            [("account_type", ASCENDING)],
+            sparse=True,
+            background=True,
+            name="users_account_type",
+        )
 
         # ── Email Verifications — TTL: auto-delete after 10 min ───────────────
         # MongoDB deletes the doc when expires_at is reached (expireAfterSeconds=0).

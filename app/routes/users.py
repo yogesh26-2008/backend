@@ -23,6 +23,16 @@ router = APIRouter()
 # Compiled once — safe regex, no ReDoS risk
 _USERNAME_RE = re.compile(r"^[a-z0-9_.]{3,20}$")
 
+# ── Account types ────────────────────────────────────────────────────────────
+# Stored lowercase in MongoDB. "personal" is the implicit default when the field
+# is absent. Only these three are eligible for the creator Marketplace / collab.
+VALID_ACCOUNT_TYPES = {"personal", "private", "creator", "business", "professional"}
+COLLAB_ACCOUNT_TYPES = ["creator", "business", "professional"]
+
+
+def _normalize_account_type(raw: str) -> str:
+    return (raw or "").strip().lower()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # USERNAME AVAILABILITY CHECK  (public — no auth needed, used during signup)
@@ -155,6 +165,7 @@ async def get_me(user_id: str = Depends(get_current_user_id), db=Depends(get_db)
         "public_key":      user.get("public_key"),
         "followers_count": user.get("followers_count", 0),
         "following_count": user.get("following_count", 0),
+        "account_type":    user.get("account_type", "personal"),
         "bio":             user.get("bio", ""),
         "link":            user.get("link", ""),
         "snapchat_link":   user.get("snapchat_link", ""),
@@ -231,6 +242,34 @@ async def update_me(
 
     await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": update_dict})
     return {"detail": "Profile updated"}
+
+
+class AccountTypeUpdate(BaseModel):
+    account_type: str
+
+
+@router.put("/me/account-type")
+@limiter.limit("20/minute")
+async def update_account_type(
+    request: Request,
+    data: AccountTypeUpdate,
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    """
+    Set the user's account type (personal/private/creator/business/professional).
+    Stored lowercase on the user document so it persists across devices and
+    survives reinstalls — and can be changed any time by calling this again.
+    """
+    acc = _normalize_account_type(data.account_type)
+    if acc not in VALID_ACCOUNT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid account type")
+
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"account_type": acc, "updated_at": datetime.now(timezone.utc)}},
+    )
+    return {"detail": "Account type updated", "account_type": acc}
 
 
 class FCMTokenUpdate(BaseModel):
@@ -463,6 +502,83 @@ async def search_users(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# COLLABORATOR DISCOVERY  (Find & Collaborate screen)
+# Only returns users whose account_type is creator / business / professional.
+# Personal & private accounts are never shown here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/collaborators")
+@limiter.limit("30/minute")
+async def find_collaborators(
+    request: Request,
+    q: str = Query("", max_length=80),
+    limit: int = Query(30, ge=1, le=50),
+    user_id: str = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    q = (q or "").strip()
+
+    # Hide users blocked in either direction
+    block_docs = await db.blocks.find(
+        {"$or": [{"blocker_id": user_id}, {"blocked_id": user_id}]},
+        {"blocker_id": 1, "blocked_id": 1, "_id": 0},
+    ).to_list(length=1000)
+    hidden_ids = set()
+    for d in block_docs:
+        hidden_ids.add(d["blocker_id"])
+        hidden_ids.add(d["blocked_id"])
+    hidden_ids.discard(user_id)
+    exclude_oids = [ObjectId(uid) for uid in hidden_ids]
+
+    # Base filter: eligible account types only, excluding self + blocked
+    base_filter: dict = {
+        "_id": {"$ne": ObjectId(user_id), "$nin": exclude_oids},
+        "account_type": {"$in": COLLAB_ACCOUNT_TYPES},
+    }
+
+    if q:
+        escaped_q = re.escape(q)
+        base_filter["$or"] = [
+            {"username": {"$regex": "^" + escaped_q, "$options": "i"}},
+            {"name": {"$regex": escaped_q, "$options": "i"}},
+        ]
+
+    projection = {
+        "name": 1, "username": 1, "picture": 1, "account_type": 1,
+        "bio": 1, "followers_count": 1, "following_count": 1,
+        "location_city": 1, "location_public": 1,
+    }
+
+    cursor = db.users.find(base_filter, projection).limit(limit)
+    users = await cursor.to_list(length=limit)
+    if not users:
+        return []
+
+    target_ids = [str(u["_id"]) for u in users]
+    following_docs = await db.follows.find(
+        {"follower_id": user_id, "following_id": {"$in": target_ids}},
+        {"following_id": 1, "_id": 0},
+    ).to_list(length=limit)
+    following_set = {doc["following_id"] for doc in following_docs}
+
+    return [
+        {
+            "id":              str(u["_id"]),
+            "name":            u.get("name", ""),
+            "username":        u.get("username", ""),
+            "picture":         u.get("picture"),
+            "account_type":    u.get("account_type", "creator"),
+            "bio":             u.get("bio", ""),
+            "followers_count": u.get("followers_count", 0),
+            "following_count": u.get("following_count", 0),
+            "location_city":   u.get("location_city", "") if u.get("location_public", True) else "",
+            "is_following":    str(u["_id"]) in following_set,
+        }
+        for u in users
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # BLOCK / UNBLOCK  (must be declared before /{user_id})
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -564,6 +680,7 @@ async def get_user_profile(
         "public_key":       user.get("public_key"),
         "followers_count":  user.get("followers_count", 0),
         "following_count":  user.get("following_count", 0),
+        "account_type":     user.get("account_type", "personal"),
         "bio":              user.get("bio", ""),
         "link":             user.get("link", ""),
         "snapchat_link":    user.get("snapchat_link", ""),
